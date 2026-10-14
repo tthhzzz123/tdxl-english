@@ -6,6 +6,7 @@ let tab = 'today', subPractice = 'exam', subMaterials = 'grammar';
 let planOpen = false;
 let recordsOpen = false;
 let pYear = null, pSection = '词汇题', pQuestions = [];
+let makeOpts = { year: 'all', sec: '混合', n: 20 };   // 出题器：年份 × 题型 × 数量
 let exam = null;                       // 当前考试：{name, qs, picks, startTs, timerId}
 const SECTIONS = { '词汇题': [1, 10], '口语交际': [13, 22], '阅读理解': [23, 47], '完形填空': [48, 57], '短文完成': [58, 77] };
 const SECTION_POINTS = { '口语交际': 1, '词汇题': 1, '阅读理解': 1, '完形填空': 1, '短文完成': 1 };   // 每题 1 分，合计 75
@@ -371,8 +372,10 @@ function pickSections(code) {
   return [['口语交际', 10], ['词汇题', 10], ['阅读理解', 25], ['完形填空', 10], ['短文完成', 20]];   // 75 题 / 150 分钟
 }
 function buildPaper(mode) {
+  if (mode === 'random' || mode === 'variant' || mode === 'make') return buildCustom(mode);
   if (mode === 'wrong') {
-    const list = wrongList().map((x) => x.q).slice(0, 20);
+    const list = wrongList().slice(0, 20)
+      .map((x) => Object.assign({}, x.q, { yr: String(x.qid).split(':')[0] }));
     return { name: '错题卷（20 题）', limitMin: 40, qs: list };
   }
   const years = Object.keys(CONTENT.exams).sort();
@@ -386,12 +389,80 @@ function buildPaper(mode) {
     qs.push(...pool.slice(0, n));
   });
   return { name: `${year} 年 · ${mode === 'full' ? '整卷' : '阶段卷'}（${qs.length} 题）`,
-           limitMin: mode === 'full' ? 150 : Math.max(30, qs.length * 2), qs, year };
+           limitMin: mode === 'full' ? 150 : Math.max(30, qs.length * 2), qs: stampYear(qs, year), year };
+}
+
+/* ---------------- 出题系统：随机卷 / 错题变式卷 / 自定义卷 ---------------- */
+function shufflePick(arr, n) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = a[i]; a[i] = a[j]; a[j] = t;
+  }
+  return a.slice(0, n);
+}
+function sectionOfQ(q) {
+  return Object.keys(SECTIONS).find((s) => q.no >= SECTIONS[s][0] && q.no <= SECTIONS[s][1]) || '其他';
+}
+function allBySection(sec) {
+  const [lo, hi] = SECTIONS[sec] || [1, 999];
+  const pool = [];
+  Object.entries(CONTENT.exams).forEach(([y, list]) => list.forEach((q) => {
+    if (q.no >= lo && q.no <= hi && Object.keys(q.options || {}).length) {
+      pool.push(q.yr ? q : Object.assign({}, q, { yr: y }));
+    }
+  }));
+  return pool;
+}
+/** 给题目打上来源年份（跨年组卷时题号会重复，必须靠「年份:题号」区分） */
+function stampYear(list, year) {
+  return list.map((q) => (q.yr ? q : Object.assign({}, q, { yr: year })));
+}
+function qidOf(q, fallbackYear) {
+  return `${q.yr || fallbackYear || ''}:${q.no}`;
+}
+function buildCustom(mode) {
+  if (mode === 'random') {
+    const spec = pickSections(phaseCode());
+    const qs = [];
+    spec.forEach(([sec, n]) => qs.push(...shufflePick(allBySection(sec), n)));
+    return { name: `随机卷（${qs.length} 题）`, limitMin: Math.max(30, qs.length * 2), qs };
+  }
+  if (mode === 'variant') {
+    const wrongs = wrongList().map((x) => Object.assign({}, x.q, { yr: String(x.qid).split(':')[0] }));
+    if (!wrongs.length) return { name: '错题变式卷', limitMin: 30, qs: [] };
+    const bySec = {};
+    wrongs.forEach((q) => { const s = sectionOfQ(q); bySec[s] = (bySec[s] || 0) + 1; });
+    const qs = [];
+    Object.entries(bySec).forEach(([sec, n]) => {
+      const used = new Set(wrongs.filter((q) => sectionOfQ(q) === sec).map((q) => qidOf(q)));
+      const pool = allBySection(sec).filter((q) => !used.has(qidOf(q)));
+      qs.push(...shufflePick(pool, n));
+    });
+    return { name: `错题变式卷（${qs.length} 题）`, limitMin: Math.max(30, qs.length * 2), qs };
+  }
+  // make：自定义（年份 × 题型 × 数量）
+  const y = (makeOpts && makeOpts.year) || 'all';
+  const sec = (makeOpts && makeOpts.sec) || '混合';
+  const n = (makeOpts && makeOpts.n) || 20;
+  const list = y === 'all'
+    ? Object.entries(CONTENT.exams).flatMap(([yy, arr]) => stampYear(arr, yy))
+    : stampYear(CONTENT.exams[y] || [], y);
+  let pool = list.filter((q) => Object.keys(q.options || {}).length);
+  if (sec !== '混合') {
+    const [lo, hi] = SECTIONS[sec] || [1, 999];
+    pool = pool.filter((q) => q.no >= lo && q.no <= hi);
+  }
+  const qs = shufflePick(pool, Math.min(n, pool.length));
+  return { name: `自选卷（${y === 'all' ? '跨年' : y} · ${sec} · ${qs.length} 题）`,
+           limitMin: Math.max(20, qs.length * 2), qs };
 }
 function renderExamHub() {
   const hist = (state.exams || []).slice().reverse();
   const code = phaseCode();
   const spec = pickSections(code);
+  const years = Object.keys(CONTENT.exams).sort();
+  const wrongN = wrongList().length;
   view().insertAdjacentHTML('beforeend', `
     <div class="card"><h3>考试中心</h3>
       <div class="muted">按你当前阶段（${code}）自动组卷：${spec.map(([s, n]) => s + ' ' + n + ' 题').join('、')}。
@@ -400,6 +471,24 @@ function renderExamHub() {
         <button class="btn" id="btnStage">阶段卷</button>
         <button class="btn ghost" id="btnFull">真题整卷（75 题/150 分钟）</button>
         <button class="btn ghost" id="btnWrongExam">错题卷（20 题）</button></div></div>
+    <div class="card"><h3>出题器 · 自己组卷</h3>
+      <div class="muted">想练哪儿就出哪儿。选好之后「练习这套」＝边做边看答案；「考这套」＝计时闭卷、交卷判分。</div>
+      <div class="row" style="margin-top:10px">
+        <select id="mkYear"><option value="all">全部年份</option>${years.map((y) => `<option value="${y}">${y} 年</option>`).join('')}</select>
+        <select id="mkSec"><option value="混合">混合题型</option>${Object.keys(SECTIONS).map((s) => `<option value="${s}">${s}</option>`).join('')}</select>
+        <select id="mkN">${[10, 20, 30, 50].map((n) => `<option value="${n}">${n} 题</option>`).join('')}</select>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" id="btnMakePractice">练习这套</button>
+        <button class="btn ghost" id="btnMakeExam">考这套</button>
+      </div>
+      <div class="muted" id="mkHint" style="margin-top:8px"></div></div>
+    <div class="card"><h3>一键组卷</h3>
+      <div class="row">
+        <button class="btn ghost" id="btnRandom">随机卷</button>
+        <button class="btn ghost" id="btnVariant">错题变式卷（${wrongN} 题可参考）</button></div>
+      <div class="muted" style="margin-top:8px">随机卷＝按当前阶段题型比例，从 6 年真题里随机抽（每次都不一样）；
+        错题变式卷＝按你错题的题型分布，再抽同类型的新题练手（避开刚做错的那些）。</div></div>
     <div class="card"><h3>历史成绩（${hist.length} 次）</h3>
       ${hist.length ? hist.map((e) => `<div class="plan-row"><span class="plan-date">${String(e.date).slice(5, 16)}</span>
         <span class="tag">${e.name}</span><span class="muted">总分 ${e.total} ｜ 客观题 ${e.score75}/75 ｜ 用时 ${e.minutes} 分</span></div>`).join('')
@@ -407,11 +496,37 @@ function renderExamHub() {
   $('#btnStage').onclick = () => startExam('stage');
   $('#btnFull').onclick = () => startExam('full');
   $('#btnWrongExam').onclick = () => startExam('wrong');
+  $('#btnRandom').onclick = () => startExam('random');
+  $('#btnVariant').onclick = () => startExam('variant');
+  const mkHint = () => {
+    const y = $('#mkYear').value, s = $('#mkSec').value;
+    const list = y === 'all' ? Object.values(CONTENT.exams).flat() : (CONTENT.exams[y] || []);
+    const avail = list.filter((q) => Object.keys(q.options || {}).length &&
+      (s === '混合' || (q.no >= SECTIONS[s][0] && q.no <= SECTIONS[s][1]))).length;
+    $('#mkHint').textContent = `题库里符合条件的有 ${avail} 题；出卷时随机抽 ${Math.min(makeOpts.n, avail)} 题。`;
+  };
+  ['mkYear', 'mkSec', 'mkN'].forEach((id) => {
+    $('#' + id).onchange = () => {
+      makeOpts = { year: $('#mkYear').value, sec: $('#mkSec').value, n: parseInt($('#mkN').value, 10) };
+      mkHint();
+    };
+  });
+  $('#mkYear').value = makeOpts.year; $('#mkSec').value = makeOpts.sec; $('#mkN').value = makeOpts.n;
+  mkHint();
+  $('#btnMakePractice').onclick = () => {
+    const paper = buildCustom('make');
+    if (!paper.qs.length) { alert('这个组合没有题目，换个年份或题型试试'); return; }
+    pYear = null; pQuestions = paper.qs; subPractice = 'exam';
+    switchTab('practice');
+    const box = document.getElementById('qbox');
+    if (box) { box.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  };
+  $('#btnMakeExam').onclick = () => startExam('make');
 }
 function startExam(mode) {
   const paper = buildPaper(mode);
   if (!paper.qs.length) { alert('没有可用的题目（错题本为空？）'); return; }
-  exam = { name: paper.name, qs: paper.qs, picks: {}, startTs: Date.now(), limitMin: paper.limitMin };
+  exam = { name: paper.name, qs: paper.qs, picks: {}, startTs: Date.now(), limitMin: paper.limitMin, year: paper.year };
   renderExamPaper();
   exam.timerId = setInterval(updateExamClock, 1000);
 }
@@ -431,14 +546,14 @@ function renderExamPaper() {
       <span class="muted" id="examProg">已答 ${answered}/${exam.qs.length}</span>
       <button class="btn" id="btnSubmit">交卷</button>
       <button class="btn ghost" id="btnAbort">放弃</button></div></div>
-    <div id="examBox">${exam.qs.map((q) => `<div class="card q"><div class="muted">第 ${q.no} 题</div>
+    <div id="examBox">${exam.qs.map((q, i) => `<div class="card q"><div class="muted">第 ${i + 1} 题 ｜ ${CN(q.section)}${q.yr ? ' ｜ 真题 ' + q.yr + ' 年第 ' + q.no + ' 题' : ''}</div>
       <div>${q.stem}</div>
-      ${Object.keys(q.options || {}).map((k) => `<button class="opt" data-eq="${q.no}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('')}</div>`).join('')}</div>`;
+      ${Object.keys(q.options || {}).map((k) => `<button class="opt" data-eq="${i}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('')}</div>`).join('')}</div>`;
   updateExamClock();
   view().querySelectorAll('.opt').forEach((b) => b.onclick = () => {
-    const no = b.dataset.eq;
-    exam.picks[no] = b.dataset.k;
-    view().querySelectorAll(`.opt[data-eq="${no}"]`).forEach((x) => x.classList.remove('right'));
+    const i = b.dataset.eq;
+    exam.picks[i] = b.dataset.k;
+    view().querySelectorAll(`.opt[data-eq="${i}"]`).forEach((x) => x.classList.remove('right'));
     b.classList.add('right');
     const prog = document.getElementById('examProg');
     if (prog) prog.textContent = `已答 ${Object.keys(exam.picks).length}/${exam.qs.length}`;
@@ -453,16 +568,19 @@ function finishExam() {
   clearInterval(exam.timerId);
   const bySec = {}, wrongs = [];
   let rightCount = 0;
-  exam.qs.forEach((q) => {
-    const sec = Object.keys(SECTIONS).find((s) => q.no >= SECTIONS[s][0] && q.no <= SECTIONS[s][1]) || '其他';
+  exam.qs.forEach((q, i) => {
+    const sec = sectionOfQ(q);
     bySec[sec] = bySec[sec] || { total: 0, right: 0 };
     bySec[sec].total++;
-    const pick = exam.picks[q.no];
+    const pick = exam.picks[i];
     const right = pick && String(q.answer || '').trim().toUpperCase().startsWith(pick);
     if (right) { bySec[sec].right++; rightCount++; }
     else wrongs.push(q);
-    // 答题记录入库（错题自动进错题本）
-    state.answers[`exam:${exam.name}:${q.no}`.slice(0, 40)] = { k: pick || '-', right: !!right, ts: Date.now() };
+    // 答题记录入库（键＝「年份:题号」，做错的自动进错题本）
+    const qid = qidOf(q, exam.year);
+    if (qid.split(':')[0]) {
+      state.answers[qid] = Object.assign({}, state.answers[qid], { k: pick || '-', right: !!right, ts: Date.now(), src: 'exam' });
+    }
   });
   const minutes = Math.round((Date.now() - exam.startTs) / 60000);
   const paperTotal = exam.qs.length;
@@ -511,28 +629,29 @@ function renderExam() {
 function renderQuestions() {
   const box = $('#qbox'); if (!box) return;
   let lastPassage = null;
-  box.innerHTML = pQuestions.map((q) => {
+  box.innerHTML = pQuestions.map((q, i) => {
     let head = '';
     if (q.passage && q.passage !== lastPassage) {
       lastPassage = q.passage;
       head = `<details class="card passage"><summary>📖 文章原文（${q.passage.length} 字，点开）</summary><div class="ptext">${q.passage}</div></details>`;
     }
-    const opts = Object.keys(q.options || {}).map((k) => `<button class="opt" data-q="${q.no}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('');
-    return head + `<div class="card q" id="q${q.no}"><div class="muted">第 ${q.no} 题 ｜ ${CN(q.section)}</div>
+    const opts = Object.keys(q.options || {}).map((k) => `<button class="opt" data-q="${i}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('');
+    return head + `<div class="card q" id="q${i}"><div class="muted">第 ${i + 1} 题 ｜ ${CN(q.section)}${q.yr ? ' ｜ 真题 ' + q.yr + ' 年第 ' + q.no + ' 题' : ''}</div>
       <div>${q.stem}</div>${opts}
-      <div class="muted" id="ans${q.no}" style="display:none">答案：${CN(q.answer)}</div>
-      <div class="explain" id="exp${q.no}" style="display:none">${CN(q.explanation)}</div></div>`;
+      <div class="muted" id="ans${i}" style="display:none">答案：${CN(q.answer)}</div>
+      <div class="explain" id="exp${i}" style="display:none">${CN(q.explanation)}</div></div>`;
   }).join('');
   box.querySelectorAll('.opt').forEach((b) => b.onclick = () => {
-    const q = pQuestions.find((x) => x.no == b.dataset.q);
-    const ansEl = box.querySelector('#ans' + q.no), expEl = box.querySelector('#exp' + q.no);
+    const i = +b.dataset.q, q = pQuestions[i];
+    const ansEl = box.querySelector('#ans' + i), expEl = box.querySelector('#exp' + i);
     if (ansEl && ansEl.style.display !== 'none') return;
     const right = CN(q.answer).trim().toUpperCase().startsWith(b.dataset.k);
     b.classList.add(right ? 'right' : 'wrong');
-    if (!right) { const g = box.querySelector(`.opt[data-q="${q.no}"][data-k="${CN(q.answer).trim()[0]}"]`); if (g) g.classList.add('right'); }
+    if (!right) { const g = box.querySelector(`.opt[data-q="${i}"][data-k="${CN(q.answer).trim()[0]}"]`); if (g) g.classList.add('right'); }
     if (ansEl) ansEl.style.display = 'block';
     if (expEl) expEl.style.display = 'block';
-    state.answers[pYear + ':' + q.no] = { k: b.dataset.k, right, ts: Date.now() };
+    const qid = qidOf(q, pYear);
+    if (qid.split(':')[0]) state.answers[qid] = { k: b.dataset.k, right, ts: Date.now() };
     saveState();
   });
 }
