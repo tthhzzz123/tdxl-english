@@ -5,7 +5,9 @@ let CONTENT = null, state = null;
 let tab = 'today', subPractice = 'exam', subMaterials = 'grammar';
 let planOpen = false;
 let pYear = null, pSection = '词汇题', pQuestions = [];
+let exam = null;                       // 当前考试：{name, qs, picks, startTs, timerId}
 const SECTIONS = { '词汇题': [1, 10], '口语交际': [13, 22], '阅读理解': [23, 47], '完形填空': [48, 57], '短文完成': [58, 77] };
+const SECTION_POINTS = { '口语交际': 1, '词汇题': 1, '阅读理解': 1, '完形填空': 1, '短文完成': 1 };   // 每题 1 分，合计 75
 
 const $ = (s) => document.querySelector(s);
 const view = () => document.getElementById('view');
@@ -300,13 +302,137 @@ function renderPractice() {
   const seg = `<div class="seg">
     <button data-sub="exam" class="${subPractice === 'exam' ? 'active' : ''}">真题</button>
     <button data-sub="wrong" class="${subPractice === 'wrong' ? 'active' : ''}">错题本</button>
-    <button data-sub="writing" class="${subPractice === 'writing' ? 'active' : ''}">写作翻译</button></div>`;
+    <button data-sub="writing" class="${subPractice === 'writing' ? 'active' : ''}">写作翻译</button>
+    <button data-sub="testing" class="${subPractice === 'testing' ? 'active' : ''}">考试</button></div>`;
   view().innerHTML = seg + (subPractice === 'wrong' ? '' : '');
   const bindSeg = () => view().querySelectorAll('.seg button').forEach((b) => b.onclick = () => { subPractice = b.dataset.sub; renderPractice(); });
   bindSeg();
   if (subPractice === 'exam') renderExam();
   else if (subPractice === 'wrong') renderWrong();
+  else if (subPractice === 'testing') renderExamHub();
   else renderWriting();
+}
+
+/* ---------------- 考试系统：阶段卷 / 真题整卷 / 错题卷 ---------------- */
+function phaseCode() {
+  const day = planDay();
+  return (day && day['阶段']) || 'P0';
+}
+function pickSections(code) {
+  if (code === 'P0' || code === 'P1') return [['词汇题', 10], ['阅读理解', 15]];              // 25 题 / 45 分钟
+  if (code === 'P2') return [['口语交际', 10], ['词汇题', 10], ['阅读理解', 25]];              // 45 题 / 90 分钟
+  return [['口语交际', 10], ['词汇题', 10], ['阅读理解', 25], ['完形填空', 10], ['短文完成', 20]];   // 75 题 / 150 分钟
+}
+function buildPaper(mode) {
+  if (mode === 'wrong') {
+    const list = wrongList().map((x) => x.q).slice(0, 20);
+    return { name: '错题卷（20 题）', limitMin: 40, qs: list };
+  }
+  const years = Object.keys(CONTENT.exams).sort();
+  const year = mode === 'full' ? years[years.length - 1]
+    : years[(new Date().getDate() + years.length) % years.length];
+  const spec = mode === 'full' ? pickSections('P9') : pickSections(phaseCode());
+  const qs = [];
+  spec.forEach(([sec, n]) => {
+    const [lo, hi] = SECTIONS[sec];
+    const pool = (CONTENT.exams[year] || []).filter((q) => q.no >= lo && q.no <= hi);
+    qs.push(...pool.slice(0, n));
+  });
+  return { name: `${year} 年 · ${mode === 'full' ? '整卷' : '阶段卷'}（${qs.length} 题）`,
+           limitMin: mode === 'full' ? 150 : Math.max(30, qs.length * 2), qs, year };
+}
+function renderExamHub() {
+  const hist = (state.exams || []).slice().reverse();
+  const code = phaseCode();
+  const spec = pickSections(code);
+  view().insertAdjacentHTML('beforeend', `
+    <div class="card"><h3>考试中心</h3>
+      <div class="muted">按你当前阶段（${code}）自动组卷：${spec.map(([s, n]) => s + ' ' + n + ' 题').join('、')}。
+      客观题自动判分（满分 75），翻译写作 25 分交卷后自评。</div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" id="btnStage">阶段卷</button>
+        <button class="btn ghost" id="btnFull">真题整卷（75 题/150 分钟）</button>
+        <button class="btn ghost" id="btnWrongExam">错题卷（20 题）</button></div></div>
+    <div class="card"><h3>历史成绩（${hist.length} 次）</h3>
+      ${hist.length ? hist.map((e) => `<div class="plan-row"><span class="plan-date">${String(e.date).slice(5, 16)}</span>
+        <span class="tag">${e.name}</span><span class="muted">总分 ${e.total} ｜ 客观题 ${e.score75}/75 ｜ 用时 ${e.minutes} 分</span></div>`).join('')
+        : '<div class="muted">还没有考试记录 —— 建议每两周考一次阶段卷</div>'}</div>`);
+  $('#btnStage').onclick = () => startExam('stage');
+  $('#btnFull').onclick = () => startExam('full');
+  $('#btnWrongExam').onclick = () => startExam('wrong');
+}
+function startExam(mode) {
+  const paper = buildPaper(mode);
+  if (!paper.qs.length) { alert('没有可用的题目（错题本为空？）'); return; }
+  exam = { name: paper.name, qs: paper.qs, picks: {}, startTs: Date.now(), limitMin: paper.limitMin };
+  renderExamPaper();
+  exam.timerId = setInterval(updateExamClock, 1000);
+}
+function updateExamClock() {
+  const el = document.getElementById('examClock');
+  if (!el || !exam) return;
+  const sec = Math.round((Date.now() - exam.startTs) / 1000);
+  const left = exam.limitMin * 60 - sec;
+  el.textContent = `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}` +
+    ` / 限时 ${exam.limitMin} 分${left < 0 ? '（已超时）' : ''}`;
+}
+function renderExamPaper() {
+  const answered = Object.keys(exam.picks).length;
+  view().innerHTML = `
+    <div class="card" style="position:sticky;top:44px;z-index:4"><div class="row"><b>${exam.name}</b>
+      <span class="muted" id="examClock">00:00</span>
+      <span class="muted" id="examProg">已答 ${answered}/${exam.qs.length}</span>
+      <button class="btn" id="btnSubmit">交卷</button>
+      <button class="btn ghost" id="btnAbort">放弃</button></div></div>
+    <div id="examBox">${exam.qs.map((q) => `<div class="card q"><div class="muted">第 ${q.no} 题</div>
+      <div>${q.stem}</div>
+      ${Object.keys(q.options || {}).map((k) => `<button class="opt" data-eq="${q.no}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('')}</div>`).join('')}</div>`;
+  updateExamClock();
+  view().querySelectorAll('.opt').forEach((b) => b.onclick = () => {
+    const no = b.dataset.eq;
+    exam.picks[no] = b.dataset.k;
+    view().querySelectorAll(`.opt[data-eq="${no}"]`).forEach((x) => x.classList.remove('right'));
+    b.classList.add('right');
+    const prog = document.getElementById('examProg');
+    if (prog) prog.textContent = `已答 ${Object.keys(exam.picks).length}/${exam.qs.length}`;
+  });
+  $('#btnSubmit').onclick = () => {
+    if (!confirm(`确认交卷？已答 ${Object.keys(exam.picks).length}/${exam.qs.length} 题`)) return;
+    finishExam();
+  };
+  $('#btnAbort').onclick = () => { if (confirm('放弃这次考试？不计成绩')) { clearInterval(exam.timerId); exam = null; renderPractice(); } };
+}
+function finishExam() {
+  clearInterval(exam.timerId);
+  const bySec = {}, wrongs = [];
+  let score75 = 0;
+  exam.qs.forEach((q) => {
+    const sec = Object.keys(SECTIONS).find((s) => q.no >= SECTIONS[s][0] && q.no <= SECTIONS[s][1]) || '其他';
+    bySec[sec] = bySec[sec] || { total: 0, right: 0 };
+    bySec[sec].total++;
+    const pick = exam.picks[q.no];
+    const right = pick && String(q.answer || '').trim().toUpperCase().startsWith(pick);
+    if (right) { bySec[sec].right++; score75++; }
+    else wrongs.push(q);
+    // 答题记录入库（错题自动进错题本）
+    state.answers[`exam:${exam.name}:${q.no}`.slice(0, 40)] = { k: pick || '-', right: !!right, ts: Date.now() };
+  });
+  const minutes = Math.round((Date.now() - exam.startTs) / 60000);
+  const record = { name: exam.name, date: new Date().toISOString().slice(0, 16).replace('T', ' '),
+                   score75, total: score75, minutes, sections: bySec, wrong: wrongs.length };
+  state.exams = state.exams || [];
+  state.exams.push(record);
+  saveState();
+  view().innerHTML = `<div class="card"><h3>成绩单 · ${record.name}</h3>
+      <div style="font-size:30px;font-weight:700">${score75} <span class="muted" style="font-size:16px">/ 75（客观题）</span></div>
+      <div class="muted">用时 ${minutes} 分钟 ｜ 错题 ${wrongs.length} 道已自动进错题本</div>
+      <div style="margin-top:10px">${Object.entries(bySec).map(([s, v]) =>
+        `${s}：${v.right}/${v.total}（${Math.round(v.right / v.total * 100)}%）`).join('<br>')}</div>
+      <div class="hint" style="margin-top:10px">参考：客观题 45/75 ≈ 总分 60 分线（翻译写作 25 分另计，建议自评后记在周报里）。</div>
+      <div class="row" style="margin-top:12px"><button class="btn" id="btnBackExam">返回考试中心</button>
+      <button class="btn ghost" id="btnGoWrong">看错题本</button></div></div>`;
+  $('#btnBackExam').onclick = () => { exam = null; renderPractice(); };
+  $('#btnGoWrong').onclick = () => { exam = null; subPractice = 'wrong'; renderPractice(); };
 }
 function countOf(year, section) {
   const [lo, hi] = SECTIONS[section] || [1, 10];
@@ -493,6 +619,13 @@ function weeklyReport() {
 function renderMine() {
   const rep = weeklyReport();
   view().innerHTML = `
+    <div class="card"><h3>最近成绩</h3>
+      ${(state.exams && state.exams.length)
+        ? (() => { const e = state.exams[state.exams.length - 1];
+            return `<div>${e.name} ｜ <b>${e.score75}/75</b>（客观题） ｜ 用时 ${e.minutes} 分</div>
+              <div class="muted">考试日期：${e.date} ｜ 共考过 ${state.exams.length} 次</div>`; })()
+        : '<div class="muted">还没考过 —— 建议每两周做一次阶段卷（在「练习 → 考试」里）</div>'}
+      <div class="row" style="margin-top:10px"><button class="btn" id="btnExamEntry">进入考试中心</button></div></div>
     <div class="card"><h3>本周报告</h3>
       <div>有学习记录 <b>${rep.studiedDays}/7</b> 天 ｜ 完成率 <b>${rep.avgCompletion === null ? '—' : rep.avgCompletion + '%'}</b> ｜ 正确率 <b>${rep.avgAccuracy === null ? '—' : rep.avgAccuracy + '%'}</b></div>
       ${rep.sections.length ? `<div class="muted" style="margin-top:6px">分题型：${rep.sections.map((s) => `${s.name} ${s.ratio}%`).join(' ｜ ')}</div>` : '<div class="muted" style="margin-top:6px">本周还没有做题记录</div>'}
