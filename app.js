@@ -1070,14 +1070,12 @@ function renderMine() {
       ${rep.sections.length ? `<div class="muted" style="margin-top:6px">分题型：${rep.sections.map((s) => `${s.name} ${s.ratio}%`).join(' ｜ ')}</div>` : '<div class="muted" style="margin-top:6px">本周还没有做题记录</div>'}
       <div class="muted" style="margin-top:6px">词汇：认识 ${rep.known} ／ 模糊 ${rep.fuzzy} ／ 不认识 ${rep.unknown}</div>
       <div style="margin-top:8px">${rep.tips.map((t) => `· ${t}`).join('<br>')}</div>
-      <div class="row" style="margin-top:10px"><button class="btn" id="btnCopyReport">复制本周报告</button></div>
-      <div class="muted" style="margin-top:6px">不用再发我了——你做过的题和词会自动上传，云端算好「学习成果分析」（今日页那张卡；每天 21:00 自动重算）。这里只是本机兜底版本。</div></div>
+      <div class="muted" style="margin-top:10px">这一份是本机兜底统计；正式的「学习成果分析」在<b>今日页</b>——自动更新，不用你发我。</div></div>
 
     <div class="card"><h3>计划与内容如何更新</h3>
       <div class="muted">当前计划：<b>${CONTENT.plan['起始']}</b> 起 <b>${(CONTENT.plan['日计划'] || []).length}</b> 天${state.planOverride ? '（已导入）' : '（内置）'}</div>
       <div style="margin-top:6px">· <b>换计划 / 换内容</b>：我在后台改完，你在<b>今日页顶部点「一键更新」</b>即可；平时打开 App 也会自动检查，通常你什么都不用做。</div>
-      <div>· <b>兜底</b>：要手动塞一份计划文件，走下面「数据 → 导入新计划」。</div>
-      <div>· <b>每周节奏</b>：周日复制周报给我 → 我按你的正确率重排下周 → 你导入新计划。</div></div>
+      <div>· <b>每周节奏</b>：电脑端每周日 21:30 自动拉你的学习记录 → 按完成率/正确率重排下周计划 → 自动发版；你下次打开就是新计划，全程不用你动手。</div></div>
 
     <div class="card"><h3>云同步（可选）</h3>
       <div class="muted">填地址和同步码后自动同步（不用也能本地学习）。地址已按当前站点自动填好，一般只需要填同步码。</div>
@@ -1085,22 +1083,16 @@ function renderMine() {
       <input id="syncKey" type="password" placeholder="同步码" style="width:110px" value="${(state.sync && state.sync.key) || ''}"></div>
       <div class="muted" style="margin-top:6px">${channelNote()}</div>
       <div class="row" style="margin-top:6px"><label class="muted"><input type="checkbox" id="syncAuto" ${state.sync && state.sync.auto === false ? '' : 'checked'} style="vertical-align:-2px"> 改动自动上传（推荐）</label></div>
-      <div class="row" style="margin-top:8px"><button class="btn" id="btnUp">上传到云</button><button class="btn ghost" id="btnDown">从云恢复</button>
+      <div class="row" style="margin-top:8px"><button class="btn ghost" id="btnDown">用云端数据覆盖本机</button>
       <span class="muted" id="syncMsg">${syncStatusText()}</span></div></div>
 
     <div class="card"><h3>数据</h3>
       <div class="row"><button class="btn" id="btnExport">导出数据</button><button class="btn ghost" id="btnImport">导入数据</button>
-      <button class="btn ghost" id="btnPlan">导入新计划</button>
-      <input type="file" id="fileIn" style="display:none" accept="application/json">
-      <input type="file" id="planIn" style="display:none" accept="application/json"></div>
+      <input type="file" id="fileIn" style="display:none" accept="application/json"></div>
       <div class="muted" style="margin-top:6px">数据只存在这台设备；换手机/清缓存前先导出。</div></div>
 
     <div class="card"><h3>关于</h3><div class="muted">离线可用｜内容来自你自己的 32 份资料｜考试日期 ${CONTENT.plan['考试日期']}（官方公布前为占位）</div></div>`;
 
-  $('#btnCopyReport').onclick = async () => {
-    try { await navigator.clipboard.writeText(rep.text); alert('已复制，可粘贴发我'); }
-    catch (e) { window.prompt('复制下面这段发我：', rep.text); }
-  };
   const saveSync = () => {
     const old = state.sync || {};
     state.sync = Object.assign({}, old, {
@@ -1109,17 +1101,6 @@ function renderMine() {
     saveState();
   };
   $('#syncAuto').onchange = () => { saveSync(); if ($('#syncAuto').checked) autoSync(); renderMine(); };
-  $('#btnUp').onclick = async () => {
-    saveSync(); if (!state.sync.url || !state.sync.key) return alert('先填地址和同步码');
-    try {
-      const r = await fetch(state.sync.url, { method: 'PUT', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.sync.key }, body: JSON.stringify({ state: stripSync(state) }) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const j = await r.json();
-      state.sync.lastSync = j.updatedAt || new Date().toLocaleString();
-      state.sync.pending = false; state.sync.conflict = false;
-      saveStateRaw(); $('#syncMsg').textContent = '已上传 ' + state.sync.lastSync;
-    } catch (e) { alert('上传失败：' + e.message); }
-  };
   $('#btnDown').onclick = async () => {
     saveSync(); if (!state.sync.url || !state.sync.key) return alert('先填地址和同步码');
     if (!confirm(state.sync.conflict ? '云端是别的设备改过的版本，用它覆盖本机？' : '用云端数据覆盖本机数据？')) return;
@@ -1145,27 +1126,12 @@ function renderMine() {
     r.onload = () => { try { state = JSON.parse(r.result); saveState(); alert('导入完成'); renderMine(); } catch (err) { alert('导入失败：' + err); } };
     r.readAsText(f);
   };
-  $('#btnPlan').onclick = () => $('#planIn').click();
   const rb = document.getElementById('btnRecords');
   if (rb) rb.onclick = () => { recordsOpen = !recordsOpen; renderMine(); };
   const ej = document.getElementById('btnExportCsv');
   if (ej) ej.onclick = exportCsv;
   const examBtn = document.getElementById('btnExamEntry');
   if (examBtn) examBtn.onclick = () => { subPractice = 'testing'; switchTab('practice'); };
-  $('#planIn').onchange = (e) => {
-    const f = e.target.files[0]; if (!f) return;
-    const r = new FileReader();
-    r.onload = () => {
-      try {
-        const p = JSON.parse(r.result);
-        if (!p['日计划'] || !p['起始']) throw new Error('不是计划文件');
-        state.planOverride = p; saveState(); CONTENT.plan = p;
-        $('#topSub').textContent = `距考试 ${daysToExam(p['考试日期'])} 天（${p['考试日期']}）｜ 计划 ${p['起始']} 起 ${p['日计划'].length} 天`;
-        alert('新计划已导入：' + p['起始'] + ' 起 ' + p['日计划'].length + ' 天'); switchTab('today');
-      } catch (err) { alert('导入计划失败：' + err.message); }
-    };
-    r.readAsText(f);
-  };
 }
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
