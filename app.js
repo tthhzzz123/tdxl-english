@@ -405,26 +405,30 @@ function renderExamPaper() {
 function finishExam() {
   clearInterval(exam.timerId);
   const bySec = {}, wrongs = [];
-  let score75 = 0;
+  let rightCount = 0;
   exam.qs.forEach((q) => {
     const sec = Object.keys(SECTIONS).find((s) => q.no >= SECTIONS[s][0] && q.no <= SECTIONS[s][1]) || '其他';
     bySec[sec] = bySec[sec] || { total: 0, right: 0 };
     bySec[sec].total++;
     const pick = exam.picks[q.no];
     const right = pick && String(q.answer || '').trim().toUpperCase().startsWith(pick);
-    if (right) { bySec[sec].right++; score75++; }
+    if (right) { bySec[sec].right++; rightCount++; }
     else wrongs.push(q);
     // 答题记录入库（错题自动进错题本）
     state.answers[`exam:${exam.name}:${q.no}`.slice(0, 40)] = { k: pick || '-', right: !!right, ts: Date.now() };
   });
   const minutes = Math.round((Date.now() - exam.startTs) / 60000);
+  const paperTotal = exam.qs.length;
+  const score75 = Math.round(rightCount / paperTotal * 75);          // 折算成整卷 75 分制
   const record = { name: exam.name, date: new Date().toISOString().slice(0, 16).replace('T', ' '),
-                   score75, total: score75, minutes, sections: bySec, wrong: wrongs.length };
+                   score: rightCount, paperTotal, score75, total: score75, minutes,
+                   sections: bySec, wrong: wrongs.length };
   state.exams = state.exams || [];
   state.exams.push(record);
   saveState();
   view().innerHTML = `<div class="card"><h3>成绩单 · ${record.name}</h3>
-      <div style="font-size:30px;font-weight:700">${score75} <span class="muted" style="font-size:16px">/ 75（客观题）</span></div>
+      <div style="font-size:30px;font-weight:700">${record.score} <span class="muted" style="font-size:16px">/ ${paperTotal}（本卷客观题）</span></div>
+      <div class="muted">正确率 ${Math.round(record.score / paperTotal * 100)}% ｜ 折算整卷：<b>${score75} / 75</b></div>
       <div class="muted">用时 ${minutes} 分钟 ｜ 错题 ${wrongs.length} 道已自动进错题本</div>
       <div style="margin-top:10px">${Object.entries(bySec).map(([s, v]) =>
         `${s}：${v.right}/${v.total}（${Math.round(v.right / v.total * 100)}%）`).join('<br>')}</div>
@@ -693,6 +697,8 @@ function renderMine() {
     r.readAsText(f);
   };
   $('#btnPlan').onclick = () => $('#planIn').click();
+  const examBtn = document.getElementById('btnExamEntry');
+  if (examBtn) examBtn.onclick = () => { subPractice = 'testing'; switchTab('practice'); };
   $('#planIn').onchange = (e) => {
     const f = e.target.files[0]; if (!f) return;
     const r = new FileReader();
