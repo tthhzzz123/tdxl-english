@@ -1077,6 +1077,11 @@ function renderMine() {
       <div style="margin-top:6px">· <b>换计划 / 换内容</b>：我在后台改完，你在<b>今日页顶部点「一键更新」</b>即可；平时打开 App 也会自动检查，通常你什么都不用做。</div>
       <div>· <b>每周节奏</b>：电脑端每周日 21:30 自动拉你的学习记录 → 按完成率/正确率重排下周计划 → 自动发版；你下次打开就是新计划，全程不用你动手。</div></div>
 
+    <div class="card"><h3>时间提醒（导入手机日历）</h3>
+      <div class="muted">点下面按钮下载日历文件，手机上打开就会问"要不要加入日历" —— 加进去之后，每天 <b>04:00 晨读 30 分钟</b>、<b>11:30 午间 30 分钟</b>、<b>17:00 晚间 2 小时</b> 自动响铃（提前 5 分钟提醒），<b>周日</b>只提醒你休息复盘，考前（2027-05-23）自动结束。</div>
+      <div class="row" style="margin-top:10px"><a class="btn" href="./英语学习提醒.ics" download>下载日历提醒（.ics）</a></div>
+      <div class="muted" style="margin-top:6px;font-size:12px">不依赖电脑、不依赖网络；想改时间或加节假日例外，跟我说一句我重新生成。</div></div>
+
     <div class="card"><h3>云同步（可选）</h3>
       <div class="muted">填地址和同步码后自动同步（不用也能本地学习）。地址已按当前站点自动填好，一般只需要填同步码。</div>
       <div class="row" style="margin-top:6px"><input id="syncUrl" placeholder="https://.../api/sync" style="flex:1;min-width:170px" value="${(state.sync && state.sync.url) || defaultSyncUrl()}">
