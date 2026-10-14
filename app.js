@@ -61,6 +61,7 @@ async function autoSync() {
     const j2 = await r.json();
     state.sync.lastSync = j2.updatedAt || new Date().toLocaleString();
     state.sync.pending = false; state.sync.conflict = false;
+    if (typeof fetchAnalysis === 'function') setTimeout(() => fetchAnalysis(false), 800);   // 传完顺手刷新分析
   } catch (e) {
     /* 离线 / 暂时连不上：留着 pending，下次打开或联网时再传 */
   }
@@ -176,6 +177,82 @@ function taskProgress(t) { return taskProgressAt(todayStr(), t); }
 /* ---------------- 内容版本：后台改完计划/内容 → 手机一键更新 / 打开自动更新 ---------------- */
 let updNote = '';
 let lastAutoCheck = 0;
+let analysis = null, analysisMsg = '', lastAnalysisAt = 0;
+try { analysis = JSON.parse(localStorage.getItem('tdxl_analysis')) || null; } catch (e) { analysis = null; }
+function analysisUrl() {
+  const u = (state && state.sync && state.sync.url) || '';
+  if (!u) return '';
+  return /\/sync$/.test(u) ? u.replace(/\/sync$/, '/analysis') : u.replace(/\/[^/]*$/, '/analysis');
+}
+/** 拉云端分析：manual=true 时当场重算（?refresh=1） */
+async function fetchAnalysis(manual) {
+  const url = analysisUrl();
+  if (!url || !state.sync.key) { analysisMsg = '还没设置云同步'; if (manual) render(); return; }
+  if (!manual && Date.now() - lastAnalysisAt < 10 * 60 * 1000) return;
+  lastAnalysisAt = Date.now();
+  try {
+    const r = await fetch(url + (manual ? '?refresh=1' : ''), { cache: 'no-store',
+      headers: { 'Authorization': 'Bearer ' + state.sync.key } });
+    if (r.status === 404) { analysisMsg = '云端还没有你的学习记录：随便做一题、背一个词就会自动上传'; render(); return; }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    analysis = await r.json();
+    localStorage.setItem('tdxl_analysis', JSON.stringify(analysis));
+    analysisMsg = manual ? '已按最新记录重算' : '';
+    render();
+  } catch (e) {
+    analysisMsg = manual ? '云端暂时连不上：' + e.message + '（下面若是本机估算，仅供参考）' : '';
+    if (manual) render();
+  }
+}
+/** 学习成果分析卡：数据自动来、说明写在卡里 */
+function analysisText() {
+  const rep = weeklyReport();
+  if (analysis && analysis.generatedAt) {
+    return ['【学习成果分析】' + analysis.window.from + ' ~ ' + analysis.window.to,
+      '学习天数：' + analysis.studiedDays + '/7 ｜ 完成率：' + (analysis.avgCompletion === null ? '—' : analysis.avgCompletion + '%') +
+      ' ｜ 正确率：' + (analysis.avgAccuracy === null ? '—' : analysis.avgAccuracy + '%'),
+      '分题型：' + (analysis.sections || []).map((s) => `${s.name} ${s.ratio}%（${s.total} 题）`).join('、'),
+      '薄弱题型：' + (analysis.weak ? analysis.weak.name + ' ' + analysis.weak.ratio + '%' : '暂无明显薄弱'),
+      '下周调整：' + (analysis.advice ? [analysis.advice.newWords, analysis.advice.planScale < 1 ? '任务量×0.7' : '任务量不变',
+        analysis.advice.focus.join('、') || '无明显专项'].join(' ｜ ') : '—'),
+      analysis.summary].join('\n');
+  }
+  return rep.text;
+}
+function analysisCard() {
+  const rep = weeklyReport();
+  const hasCloud = analysis && analysis.generatedAt;
+  const a = hasCloud ? analysis : {
+    avgCompletion: rep.avgCompletion, avgAccuracy: rep.avgAccuracy, studiedDays: rep.studiedDays,
+    weak: rep.sections.filter((x) => x.total >= 3).sort((x, y) => x.ratio - y.ratio)[0] || null,
+    advice: null, summary: rep.tips.join('；'), words: { known: rep.known, fuzzy: rep.fuzzy, unknown: rep.unknown },
+  };
+  const when = hasCloud ? String(analysis.generatedAt).replace('T', ' ').slice(0, 16) : '本机估算';
+  const adv = a.advice;
+  const advText = adv
+    ? [adv.newWords === 'half' ? '新词减半' : adv.newWords === 'plus25' ? '新词加量 25%' : '词汇量保持',
+       adv.planScale < 1 ? '任务量 ×0.7' : '任务量不变',
+       adv.focus.length ? '加练 ' + adv.focus.join('、') : '无明显薄弱项'].join(' ｜ ')
+    : '';
+  return `<div class="card" id="analysisCard"><h3>学习成果分析</h3>
+    <div class="dash">
+      <div><b>${a.studiedDays === null ? '—' : a.studiedDays + '/7'}</b><span>学习天数</span></div>
+      <div><b>${a.avgCompletion === null ? '—' : a.avgCompletion + '%'}</b><span>完成率</span></div>
+      <div><b>${a.avgAccuracy === null ? '—' : a.avgAccuracy + '%'}</b><span>正确率</span></div>
+      <div><b>${a.weak ? a.weak.name : '—'}</b><span>薄弱题型${a.weak ? ' ' + a.weak.ratio + '%' : ''}</span></div>
+      <div><b>${a.words ? a.words.known : 0}</b><span>累计认识词</span></div>
+      <div><b>${a.words ? a.words.unknown : 0}</b><span>待攻克的词</span></div>
+    </div>
+    <div class="muted" style="margin-top:8px">${CN(a.summary)}</div>
+    ${advText ? `<div class="hint" style="margin-top:6px">下周调整：${advText}</div>` : ''}
+    <div class="row" style="margin-top:10px"><button class="btn" id="btnAnalysisRefresh">立即刷新</button>
+      <button class="btn ghost" id="btnAnalysisCopy">复制分析文本</button></div>
+    <div class="muted" style="margin-top:6px;font-size:12px">
+      这张卡不用你手动发我：你做过的题、背过的词会自动上传，云端按近 7 天算好分析（每天 21:00 自动重算，打开 App 也会刷新）。
+      ${hasCloud ? '数据时间 ' + when : '（云端还没数据，下面是本机估算）'}<br>
+      ${analysisMsg ? CN(analysisMsg) : '想立刻看最新结果，点「立即刷新」。'}
+    </div></div>`;
+}
 function appliedVer() { return (state && state.contentVer) || (CONTENT && CONTENT.generated) || ''; }
 function refreshTop() {
   const days = CONTENT.plan['日计划'] || [];
@@ -231,6 +308,7 @@ async function boot() {
   document.querySelectorAll('.tabs button').forEach((b) => b.onclick = () => switchTab(b.dataset.tab));
   render();
   setTimeout(() => checkContent(false), 1500);                     // 打开就自动检查一次
+  setTimeout(() => fetchAnalysis(false), 3000);                    // 打开就拉一次云端分析（约 10 分钟最多一次）
   setTimeout(() => {                                               // 上次没传上去的，打开就补传
     if (state.sync && state.sync.pending) autoSync();
   }, 2500);
@@ -341,7 +419,7 @@ function renderToday() {
   const done = counted.filter((p) => p.status === 'ok').length;
   const pct = counted.length ? Math.round(done / counted.length * 100) : 0;
   const isToday = day['日期'] === todayStr();
-  let html = updateBar() + dashboardCard(day, rows, done) + `<div class="card"><h3>${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
+  let html = updateBar() + dashboardCard(day, rows, done) + analysisCard() + `<div class="card"><h3>${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
     <div class="bar"><i style="width:${pct}%"></i></div>
     <div class="muted">已完成 <b>${done}</b> / 未完成 <b>${counted.length - done}</b>（${pct}%）${isToday ? '' : '（当前显示 ' + day['日期'] + ' 的计划）'}<br>
       <span style="font-size:12px">完成状态由你的实际学习记录自动判定（背完词/做完题/读过资料即自动打勾）</span></div>
@@ -375,6 +453,14 @@ function renderToday() {
   };
   const dashExam = document.getElementById('btnDashExam');
   if (dashExam) dashExam.onclick = () => { subPractice = 'testing'; switchTab('practice'); };
+  const anRefresh = document.getElementById('btnAnalysisRefresh');
+  if (anRefresh) anRefresh.onclick = () => { analysisMsg = '正在按最新记录重算…'; renderToday(); fetchAnalysis(true); };
+  const anCopy = document.getElementById('btnAnalysisCopy');
+  if (anCopy) anCopy.onclick = async () => {
+    const text = analysisText();
+    try { await navigator.clipboard.writeText(text); alert('已复制分析文本'); }
+    catch (e) { window.prompt('复制下面这段：', text); }
+  };
   const ob = document.getElementById('btnOnboard');
   if (ob) ob.onclick = () => { localStorage.setItem('tdxl_onboarded', '1'); renderToday(); };
   rows.forEach((r) => {
@@ -985,7 +1071,7 @@ function renderMine() {
       <div class="muted" style="margin-top:6px">词汇：认识 ${rep.known} ／ 模糊 ${rep.fuzzy} ／ 不认识 ${rep.unknown}</div>
       <div style="margin-top:8px">${rep.tips.map((t) => `· ${t}`).join('<br>')}</div>
       <div class="row" style="margin-top:10px"><button class="btn" id="btnCopyReport">复制本周报告</button></div>
-      <div class="muted" style="margin-top:6px">复制后发我，我据此重排下周计划。</div></div>
+      <div class="muted" style="margin-top:6px">不用再发我了——你做过的题和词会自动上传，云端算好「学习成果分析」（今日页那张卡；每天 21:00 自动重算）。这里只是本机兜底版本。</div></div>
 
     <div class="card"><h3>计划与内容如何更新</h3>
       <div class="muted">当前计划：<b>${CONTENT.plan['起始']}</b> 起 <b>${(CONTENT.plan['日计划'] || []).length}</b> 天${state.planOverride ? '（已导入）' : '（内置）'}</div>
