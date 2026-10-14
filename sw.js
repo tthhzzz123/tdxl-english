@@ -1,5 +1,5 @@
-/* 离线缓存：外壳「网络优先」（保证更新即时生效），内容包「缓存优先」（省流量、可离线） */
-const CACHE = 'tdxl-v2';
+/* 离线缓存：外壳「网络优先」（更新即时生效），内容包「先给缓存、后台更新」（省流量、能离线、下次打开就是新版） */
+const CACHE = 'tdxl-v3';
 const ASSETS = ['./index.html', './app.js', './style.css', './manifest.webmanifest', './icon.svg', './data/content.json'];
 
 self.addEventListener('install', (e) => {
@@ -16,11 +16,16 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   const isData = url.pathname.includes('/data/');
   if (isData) {
-    e.respondWith(caches.match(e.request).then((hit) => hit || fetch(e.request).then((res) => {
-      const copy = res.clone();
-      caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
-      return res;
-    })));
+    e.respondWith(caches.match(e.request).then((hit) => {
+      const fresh = fetch(e.request).then((res) => {
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+        }
+        return res;
+      }).catch(() => hit);
+      return hit || fresh;          // 有缓存立刻用；同时后台拉新版，下次打开就是新的
+    }));
     return;
   }
   e.respondWith(fetch(e.request).then((res) => {
