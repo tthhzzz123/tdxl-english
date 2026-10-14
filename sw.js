@@ -14,6 +14,14 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
+  if (url.pathname.endsWith('/version.json')) {          // 版本清单必须每次问服务器，不能被缓存骗了
+    e.respondWith(fetch(e.request, { cache: 'no-store' }).catch(() => caches.match(e.request)));
+    return;
+  }
+  if (e.request.cache === 'no-store') {                  // 页面显式要最新版（一键更新）时，别拿缓存糊弄它
+    e.respondWith(fetch(e.request, { cache: 'no-store' }).catch(() => caches.match(e.request)));
+    return;
+  }
   const isData = url.pathname.includes('/data/');
   if (isData) {
     e.respondWith(caches.match(e.request).then((hit) => {
