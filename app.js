@@ -111,6 +111,36 @@ function planDay() {
 }
 function dayState(date) { state.days[date] = state.days[date] || { tasks: {} }; return state.days[date]; }
 
+/* ---------------- 学习时长（心跳：页面可见时每分钟记 1 分钟） ---------------- */
+function totalMinutes() {
+  return Object.values(state.activity || {}).reduce((a, v) => a + (v.minutes || 0), 0);
+}
+setInterval(() => {
+  if (document.visibilityState !== 'visible' || !CONTENT) return;
+  const a = todayAct();
+  a.minutes = (a.minutes || 0) + 1;
+  saveState();
+}, 60000);
+
+/* ---------------- 仪表板（一屏六项） ---------------- */
+function dashboardCard(day, rows, done) {
+  const rep = weeklyReport();
+  const last = (state.exams || []).slice(-1)[0];
+  const weak = rep.sections.filter((s) => s.total >= 3).sort((a, b) => a.ratio - b.ratio)[0];
+  const mins = totalMinutes();
+  const today = (todayAct().minutes || 0);
+  return `<div class="card"><h3>仪表板</h3>
+    <div class="dash">
+      <div><b>${done}/${rows.length}</b><span>今日任务</span></div>
+      <div><b>${rep.avgCompletion === null ? '—' : rep.avgCompletion + '%'}</b><span>本周完成率</span></div>
+      <div><b>${Math.floor(mins / 60)}h${mins % 60}m</b><span>累计学习（今日 ${today}m）</span></div>
+      <div><b>${last ? last.score75 : '—'}</b><span>最近成绩 /75</span></div>
+      <div><b>${weak ? weak.name : '—'}</b><span>薄弱题型${weak ? ' ' + weak.ratio + '%' : ''}</span></div>
+      <div><button class="btn" id="btnDashExam">考试入口</button><span>每两周一次</span></div>
+    </div>
+    <div class="muted" style="margin-top:8px">今日：${day['日期']} · ${day['类型']} · ${day['阶段']} ｜ 距考试 ${daysToExam(CONTENT.plan['考试日期'])} 天</div></div>`;
+}
+
 function taskAction(t) {
   const ty = t['类型'] || '';
   if (ty === '新词' || ty === '复习词') return { label: '背词', go: () => openWords(t['词表'] || []) };
@@ -169,7 +199,7 @@ function renderToday() {
   const done = counted.filter((p) => p.status === 'ok').length;
   const pct = counted.length ? Math.round(done / counted.length * 100) : 0;
   const isToday = day['日期'] === todayStr();
-  let html = `<div class="card"><h3>${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
+  let html = dashboardCard(day, rows, done) + `<div class="card"><h3>${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
     <div class="bar"><i style="width:${pct}%"></i></div>
     <div class="muted">已完成 <b>${done}</b> / 未完成 <b>${counted.length - done}</b>（${pct}%）${isToday ? '' : '（当前显示 ' + day['日期'] + ' 的计划）'}<br>
       <span style="font-size:12px">完成状态由你的实际学习记录自动判定（背完词/做完题/读过资料即自动打勾）</span></div>
@@ -196,6 +226,8 @@ function renderToday() {
   });
   view().innerHTML = html;
   $('#btnPlanView').onclick = () => { planOpen = !planOpen; renderToday(); };
+  const dashExam = document.getElementById('btnDashExam');
+  if (dashExam) dashExam.onclick = () => { subPractice = 'testing'; switchTab('practice'); };
   const ob = document.getElementById('btnOnboard');
   if (ob) ob.onclick = () => { localStorage.setItem('tdxl_onboarded', '1'); renderToday(); };
   rows.forEach((r) => {
