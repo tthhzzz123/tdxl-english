@@ -4,6 +4,7 @@ const MODE_KEY = 'tdxl_word_mode';
 let CONTENT = null, state = null;
 let tab = 'today', subPractice = 'exam', subMaterials = 'grammar';
 let planOpen = false;
+let recordsOpen = false;
 let pYear = null, pSection = '词汇题', pQuestions = [];
 let exam = null;                       // 当前考试：{name, qs, picks, startTs, timerId}
 const SECTIONS = { '词汇题': [1, 10], '口语交际': [13, 22], '阅读理解': [23, 47], '完形填空': [48, 57], '短文完成': [58, 77] };
@@ -41,12 +42,24 @@ function todayAnswers() {
   const d = todayStr();
   return Object.entries(state.answers || {}).filter(([, r]) => r && r.ts && new Date(r.ts).toLocaleDateString('sv-SE') === d);
 }
-/** 自动判定某个任务的完成度：返回 {done, total, status} */
-function taskProgress(t) {
-  const act = todayAct();
+function actOf(date) {
+  state.activity = state.activity || {};
+  state.activity[date] = state.activity[date] || { words: {}, read: {}, writing: {} };
+  const a = state.activity[date];
+  a.words = a.words || {}; a.read = a.read || {}; a.writing = a.writing || {};
+  return a;
+}
+function answersOn(date) {
+  return Object.entries(state.answers || {}).filter(([, r]) =>
+    r && r.ts && new Date(r.ts).toLocaleDateString('sv-SE') === date);
+}
+/** 自动判定某天某个任务的完成度：返回 {done, total, status} */
+function taskProgressAt(date, t) {
+  const act = actOf(date);
+  const dayAns = answersOn(date);
   const ty = t['题型'] || t['类型'] || '';
   if (ty === '整卷模考') {
-    const n = todayAnswers().length;
+    const n = dayAns.length;
     return { done: Math.min(n, 75), total: 75, status: n === 0 ? 'todo' : n >= 75 ? 'ok' : 'doing' };
   }
   if (ty === '语法/考点') {
@@ -60,7 +73,8 @@ function taskProgress(t) {
   if (ty === '错题重做') {
     const wrong = wrongList().length;
     if (!wrong) return { done: 1, total: 1, status: 'ok' };
-    const retried = todayAnswers().filter(([qid]) => String(state.answers[qid].retried || 0) && new Date(state.answers[qid].retried).toLocaleDateString('sv-SE') === todayStr()).length;
+    const retried = Object.entries(state.answers || {}).filter(([, r]) =>
+      r.retried && new Date(r.retried).toLocaleDateString('sv-SE') === date).length;
     return { done: Math.min(retried, wrong), total: wrong, status: retried >= wrong ? 'ok' : retried ? 'doing' : 'todo' };
   }
   const words = t['词表'] || [];
@@ -71,7 +85,7 @@ function taskProgress(t) {
   const sec = t['题型'] || '';
   if (sec && SECTIONS[sec]) {
     const need = t['题量'] || SECTIONS[sec][1] - SECTIONS[sec][0] + 1;
-    const done = todayAnswers().filter(([qid, r]) => {
+    const done = dayAns.filter(([qid]) => {
       const [y, no] = String(qid).split(':');
       const inYear = !t['年份'] || String(t['年份']) === y;
       const [lo, hi] = SECTIONS[sec] || [1, 999];
@@ -81,6 +95,7 @@ function taskProgress(t) {
   }
   return { done: 0, total: 0, status: 'none' };   // 休息/机动等不计入
 }
+function taskProgress(t) { return taskProgressAt(todayStr(), t); }
 
 /* ---------------- 启动 ---------------- */
 async function boot() {
@@ -652,9 +667,60 @@ function weeklyReport() {
     '建议：' + tips.join('；')].join('\n');
   return { studiedDays, avgCompletion, avgAccuracy, sections, known, fuzzy, unknown, tips, text };
 }
+/* ---------------- 学习记录中心 ---------------- */
+function recordsRows(days) {
+  return days.map((d) => {
+    const a = (state.activity || {})[d] || {};
+    const plan = (CONTENT.plan['日计划'] || []).find((x) => x['日期'] === d);
+    const tasks = plan ? (plan['时段'] || []).flatMap((s) => s['任务清单'] || []) : [];
+    const counted = tasks.map((t) => taskProgressAt(d, t)).filter((p) => p.status !== 'none');
+    const done = counted.filter((p) => p.status === 'ok').length;
+    const ans = answersOn(d);
+    const right = ans.filter(([, r]) => r.right).length;
+    return { d, minutes: a.minutes || 0, done, total: counted.length,
+             words: Object.keys(a.words || {}).length, answers: ans.length, right };
+  });
+}
+function recordsCard() {
+  const days = lastNDates(14).reverse();
+  const rows = recordsRows(days);
+  const sum = rows.reduce((a, r) => ({ minutes: a.minutes + r.minutes, words: a.words + r.words,
+                                       answers: a.answers + r.answers, right: a.right + r.right }),
+                          { minutes: 0, words: 0, answers: 0, right: 0 });
+  const known = Object.values(state.words || {}).reduce((a, v) => a + (v.known || 0), 0);
+  const fuzzy = Object.values(state.words || {}).reduce((a, v) => a + (v.fuzzy || 0), 0);
+  const unknown = Object.values(state.words || {}).reduce((a, v) => a + (v.unknown || 0), 0);
+  const learned = Object.keys(state.words || {}).length;
+  return `<div class="card"><h3>学习记录</h3>
+    <div class="muted">近 14 天：学习 <b>${Math.floor(sum.minutes / 60)} 小时 ${sum.minutes % 60} 分</b> ｜ 背词 ${sum.words} 词次
+      ｜ 答题 ${sum.answers} 题（正确率 ${sum.answers ? Math.round(sum.right / sum.answers * 100) : 0}%）</div>
+    <div class="muted">词汇掌握：已学 <b>${learned}</b> 词 ｜ 认识 ${known} / 模糊 ${fuzzy} / 不认识 ${unknown}</div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn ghost" id="btnRecords">${recordsOpen ? '收起每日明细' : '查看每日明细'}</button>
+      <button class="btn ghost" id="btnExportCsv">导出 CSV</button></div>
+    ${recordsOpen ? `<div style="margin-top:8px;overflow-x:auto"><table style="width:100%;font-size:13px;border-collapse:collapse">
+      <tr><th align="left">日期</th><th>时长</th><th>任务</th><th>背词</th><th>答题</th><th>正确率</th></tr>
+      ${rows.map((r) => `<tr><td>${r.d.slice(5)}</td><td align="center">${r.minutes}m</td>
+        <td align="center">${r.done}/${r.total}</td><td align="center">${r.words}</td>
+        <td align="center">${r.answers}</td><td align="center">${r.answers ? Math.round(r.right / r.answers * 100) + '%' : '—'}</td></tr>`).join('')}
+    </table></div>` : ''}</div>`;
+}
+function exportCsv() {
+  const days = lastNDates(30).reverse();
+  const lines = ['日期,学习分钟,任务完成,任务总数,背词数,答题数,正确数,正确率'];
+  recordsRows(days).forEach((r) => lines.push([r.d, r.minutes, r.done, r.total, r.words, r.answers, r.right,
+    r.answers ? Math.round(r.right / r.answers * 100) + '%' : ''].join(',')));
+  const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '英语学习记录-' + todayStr() + '.csv';
+  a.click();
+}
+
 function renderMine() {
   const rep = weeklyReport();
   view().innerHTML = `
+    ${recordsCard()}
     <div class="card"><h3>最近成绩</h3>
       ${(state.exams && state.exams.length)
         ? (() => { const e = state.exams[state.exams.length - 1];
@@ -729,6 +795,10 @@ function renderMine() {
     r.readAsText(f);
   };
   $('#btnPlan').onclick = () => $('#planIn').click();
+  const rb = document.getElementById('btnRecords');
+  if (rb) rb.onclick = () => { recordsOpen = !recordsOpen; renderMine(); };
+  const ej = document.getElementById('btnExportCsv');
+  if (ej) ej.onclick = exportCsv;
   const examBtn = document.getElementById('btnExamEntry');
   if (examBtn) examBtn.onclick = () => { subPractice = 'testing'; switchTab('practice'); };
   $('#planIn').onchange = (e) => {
