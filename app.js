@@ -16,7 +16,59 @@ const view = () => document.getElementById('view');
 const todayStr = () => new Date().toLocaleDateString('sv-SE');
 
 function loadState() { try { return JSON.parse(localStorage.getItem(STATE_KEY)) || null; } catch (e) { return null; } }
-function saveState() { localStorage.setItem(STATE_KEY, JSON.stringify(state)); }
+function saveStateRaw() { localStorage.setItem(STATE_KEY, JSON.stringify(state)); }
+function saveState() {                    // 存本机 + 顺手排一次"自动上云"
+  saveStateRaw();
+  if (typeof scheduleAutoSync === 'function') scheduleAutoSync();
+}
+
+/* ---------------- 云同步：改完自动传（0 操作），云端被别人改过就不覆盖 ---------------- */
+let syncTimer = null, syncBusy = false;
+function syncReady() {
+  return !!(state && state.sync && state.sync.url && state.sync.key && state.sync.auto !== false);
+}
+function syncStatusText() {
+  const s = (state && state.sync) || {};
+  if (!s.url || !s.key) return '还没设置同步（填同步码就自动开了）';
+  if (s.conflict) return '云端有更新（别的设备改过）→ 点「从云恢复」拿回来';
+  if (s.pending) return '有改动待上传：联网后自动传（也可以点「上传到云」）';
+  return s.lastSync ? '已自动同步 ' + s.lastSync : '已开启自动同步（有改动就自动传）';
+}
+function scheduleAutoSync() {
+  if (state && state.sync && state.sync.url && state.sync.key) state.sync.pending = true;
+  if (!syncReady()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => { autoSync(); }, 8000);       // 停手 8 秒后自动补传
+}
+async function autoSync() {
+  if (syncBusy || !syncReady() || (navigator.onLine === false)) return;
+  syncBusy = true;
+  try {
+    const head = await fetch(state.sync.url, { cache: 'no-store',
+      headers: { 'Authorization': 'Bearer ' + state.sync.key } });
+    if (head.ok) {
+      const j = await head.json();
+      if (j.updatedAt && state.sync.lastSync && j.updatedAt !== state.sync.lastSync) {
+        state.sync.conflict = true; syncBusy = false; saveStateRaw();
+        if (tab === 'mine') renderMine();
+        return;                                              // 云端更新 → 不覆盖，等用户选
+      }
+    }
+    const r = await fetch(state.sync.url, { method: 'PUT', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.sync.key },
+      body: JSON.stringify({ state: stripSync(state) }) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j2 = await r.json();
+    state.sync.lastSync = j2.updatedAt || new Date().toLocaleString();
+    state.sync.pending = false; state.sync.conflict = false;
+  } catch (e) {
+    /* 离线 / 暂时连不上：留着 pending，下次打开或联网时再传 */
+  }
+  syncBusy = false;
+  saveStateRaw();
+  if (tab === 'mine') renderMine();
+}
+window.addEventListener('online', () => { autoSync(); });
 function freshState() { return { days: {}, words: {}, answers: {}, created: new Date().toISOString() }; }
 function stripSync(st) { const c = JSON.parse(JSON.stringify(st)); delete c.sync; return c; }
 function daysToExam(d) {
@@ -121,6 +173,52 @@ function taskProgressAt(date, t) {
 function taskProgress(t) { return taskProgressAt(todayStr(), t); }
 
 /* ---------------- 启动 ---------------- */
+/* ---------------- 内容版本：后台改完计划/内容 → 手机一键更新 / 打开自动更新 ---------------- */
+let updNote = '';
+let lastAutoCheck = 0;
+function appliedVer() { return (state && state.contentVer) || (CONTENT && CONTENT.generated) || ''; }
+function refreshTop() {
+  const days = CONTENT.plan['日计划'] || [];
+  $('#topSub').textContent = `距考试 ${daysToExam(CONTENT.plan['考试日期'])} 天（${CONTENT.plan['考试日期']}）｜ 计划 ${CONTENT.plan['起始']} 起 ${days.length} 天`;
+}
+function updateBar() {
+  return `<div class="card" style="display:flex;align-items:center;gap:8px;justify-content:space-between;padding:8px 12px">
+    <span class="muted" id="updMsg" style="font-size:12px">${updNote || '内容版本 ' + (CONTENT.generated || '未知')}</span>
+    <button class="btn" id="btnUpdate" style="flex:0 0 auto">一键更新</button></div>`;
+}
+async function checkContent(manual) {
+  if (!CONTENT) return;
+  if (!manual && Date.now() - lastAutoCheck < 2 * 60 * 1000) return;   // 前台来回切换时：2 分钟最多一次
+  lastAutoCheck = Date.now();
+  let v = null;
+  try {
+    const r = await fetch('./data/version.json?ts=' + Date.now(), { cache: 'no-store' });
+    if (r.ok) v = await r.json();
+  } catch (e) { v = null; }
+  state.lastCheck = Date.now(); saveStateRaw();
+  if (!v || !v.generated) {
+    if (manual) { updNote = '检查失败：没拿到版本信息（可能离线），稍后会自动再试'; render(); }
+    return;
+  }
+  if (v.generated === appliedVer() || v.generated === (CONTENT && CONTENT.generated)) {
+    state.contentVer = v.generated; saveStateRaw();
+    updNote = '已是最新（' + v.generated + '）'; render(); return;
+  }
+  try {
+    const r2 = await fetch('./data/content.json?ts=' + Date.now(), { cache: 'no-store' });
+    if (!r2.ok) throw new Error('HTTP ' + r2.status);
+    CONTENT = await r2.json();
+    state.contentVer = v.generated;
+    state.planOverride = null;                       // 后台的新计划优先，清掉旧的本地导入
+    saveState(); refreshTop();
+    const days = (CONTENT.plan['日计划'] || []).length;
+    updNote = '已更新：' + (v.note ? v.note + ' ｜ ' : '') + CONTENT.plan['起始'] + ' 起 ' + days + ' 天';
+    render();
+  } catch (e) {
+    updNote = '更新失败：' + e.message + '（本地版本照常用）'; render();
+  }
+}
+
 async function boot() {
   state = loadState() || freshState();
   try {
@@ -129,10 +227,16 @@ async function boot() {
     view().innerHTML = '<div class="card">内容包加载失败：' + e + '</div>'; return;
   }
   if (state.planOverride && state.planOverride['日计划']) CONTENT.plan = state.planOverride;
-  const days = CONTENT.plan['日计划'] || [];
-  $('#topSub').textContent = `距考试 ${daysToExam(CONTENT.plan['考试日期'])} 天（${CONTENT.plan['考试日期']}）｜ 计划 ${CONTENT.plan['起始']} 起 ${days.length} 天`;
+  refreshTop();
   document.querySelectorAll('.tabs button').forEach((b) => b.onclick = () => switchTab(b.dataset.tab));
   render();
+  setTimeout(() => checkContent(false), 1500);                     // 打开就自动检查一次
+  setTimeout(() => {                                               // 上次没传上去的，打开就补传
+    if (state.sync && state.sync.pending) autoSync();
+  }, 2500);
+  document.addEventListener('visibilitychange', () => {            // 回到前台也检查一次
+    if (document.visibilityState === 'visible') checkContent(false);
+  });
 }
 
 function render() {
@@ -237,7 +341,7 @@ function renderToday() {
   const done = counted.filter((p) => p.status === 'ok').length;
   const pct = counted.length ? Math.round(done / counted.length * 100) : 0;
   const isToday = day['日期'] === todayStr();
-  let html = dashboardCard(day, rows, done) + `<div class="card"><h3>${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
+  let html = updateBar() + dashboardCard(day, rows, done) + `<div class="card"><h3>${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
     <div class="bar"><i style="width:${pct}%"></i></div>
     <div class="muted">已完成 <b>${done}</b> / 未完成 <b>${counted.length - done}</b>（${pct}%）${isToday ? '' : '（当前显示 ' + day['日期'] + ' 的计划）'}<br>
       <span style="font-size:12px">完成状态由你的实际学习记录自动判定（背完词/做完题/读过资料即自动打勾）</span></div>
@@ -264,6 +368,11 @@ function renderToday() {
   });
   view().innerHTML = html;
   $('#btnPlanView').onclick = () => { planOpen = !planOpen; renderToday(); };
+  const updBtn = document.getElementById('btnUpdate');
+  if (updBtn) updBtn.onclick = () => {
+    updNote = '正在检查…'; renderToday();
+    checkContent(true);
+  };
   const dashExam = document.getElementById('btnDashExam');
   if (dashExam) dashExam.onclick = () => { subPractice = 'testing'; switchTab('practice'); };
   const ob = document.getElementById('btnOnboard');
@@ -880,17 +989,18 @@ function renderMine() {
 
     <div class="card"><h3>计划与内容如何更新</h3>
       <div class="muted">当前计划：<b>${CONTENT.plan['起始']}</b> 起 <b>${(CONTENT.plan['日计划'] || []).length}</b> 天${state.planOverride ? '（已导入）' : '（内置）'}</div>
-      <div style="margin-top:6px">· <b>换计划</b>：我用系统生成新计划文件（计划-日期.json），你在下面「数据 → 导入新计划」选一下即可。</div>
-      <div>· <b>换内容</b>：内容（真题/词库/写作/资料）打包在应用里；单文件版换内容需要我给你新的 html 文件；云托管版我更新后你刷新即可。</div>
+      <div style="margin-top:6px">· <b>换计划 / 换内容</b>：我在后台改完，你在<b>今日页顶部点「一键更新」</b>即可；平时打开 App 也会自动检查，通常你什么都不用做。</div>
+      <div>· <b>兜底</b>：要手动塞一份计划文件，走下面「数据 → 导入新计划」。</div>
       <div>· <b>每周节奏</b>：周日复制周报给我 → 我按你的正确率重排下周 → 你导入新计划。</div></div>
 
     <div class="card"><h3>云同步（可选）</h3>
-      <div class="muted">填地址和同步码后可在手机/电脑之间同步（不用也能本地学习）。地址已按当前站点自动填好，一般只需要填同步码。</div>
+      <div class="muted">填地址和同步码后自动同步（不用也能本地学习）。地址已按当前站点自动填好，一般只需要填同步码。</div>
       <div class="row" style="margin-top:6px"><input id="syncUrl" placeholder="https://.../api/sync" style="flex:1;min-width:170px" value="${(state.sync && state.sync.url) || defaultSyncUrl()}">
       <input id="syncKey" type="password" placeholder="同步码" style="width:110px" value="${(state.sync && state.sync.key) || ''}"></div>
       <div class="muted" style="margin-top:6px">${channelNote()}</div>
+      <div class="row" style="margin-top:6px"><label class="muted"><input type="checkbox" id="syncAuto" ${state.sync && state.sync.auto === false ? '' : 'checked'} style="vertical-align:-2px"> 改动自动上传（推荐）</label></div>
       <div class="row" style="margin-top:8px"><button class="btn" id="btnUp">上传到云</button><button class="btn ghost" id="btnDown">从云恢复</button>
-      <span class="muted" id="syncMsg">${state.sync && state.sync.lastSync ? '上次同步 ' + state.sync.lastSync : '未同步过'}</span></div></div>
+      <span class="muted" id="syncMsg">${syncStatusText()}</span></div></div>
 
     <div class="card"><h3>数据</h3>
       <div class="row"><button class="btn" id="btnExport">导出数据</button><button class="btn ghost" id="btnImport">导入数据</button>
@@ -905,25 +1015,37 @@ function renderMine() {
     try { await navigator.clipboard.writeText(rep.text); alert('已复制，可粘贴发我'); }
     catch (e) { window.prompt('复制下面这段发我：', rep.text); }
   };
-  const saveSync = () => { state.sync = { url: $('#syncUrl').value.trim(), key: $('#syncKey').value.trim(), lastSync: (state.sync && state.sync.lastSync) || null }; saveState(); };
+  const saveSync = () => {
+    const old = state.sync || {};
+    state.sync = Object.assign({}, old, {
+      url: $('#syncUrl').value.trim(), key: $('#syncKey').value.trim(),
+      auto: $('#syncAuto').checked });
+    saveState();
+  };
+  $('#syncAuto').onchange = () => { saveSync(); if ($('#syncAuto').checked) autoSync(); renderMine(); };
   $('#btnUp').onclick = async () => {
     saveSync(); if (!state.sync.url || !state.sync.key) return alert('先填地址和同步码');
     try {
-      const r = await fetch(state.sync.url, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.sync.key }, body: JSON.stringify({ state: stripSync(state) }) });
+      const r = await fetch(state.sync.url, { method: 'PUT', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.sync.key }, body: JSON.stringify({ state: stripSync(state) }) });
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      const j = await r.json(); state.sync.lastSync = j.updatedAt || new Date().toLocaleString(); saveState(); $('#syncMsg').textContent = '已上传 ' + state.sync.lastSync;
+      const j = await r.json();
+      state.sync.lastSync = j.updatedAt || new Date().toLocaleString();
+      state.sync.pending = false; state.sync.conflict = false;
+      saveStateRaw(); $('#syncMsg').textContent = '已上传 ' + state.sync.lastSync;
     } catch (e) { alert('上传失败：' + e.message); }
   };
   $('#btnDown').onclick = async () => {
     saveSync(); if (!state.sync.url || !state.sync.key) return alert('先填地址和同步码');
-    if (!confirm('用云端数据覆盖本机数据？')) return;
+    if (!confirm(state.sync.conflict ? '云端是别的设备改过的版本，用它覆盖本机？' : '用云端数据覆盖本机数据？')) return;
     try {
-      const r = await fetch(state.sync.url, { headers: { 'Authorization': 'Bearer ' + state.sync.key } });
+      const r = await fetch(state.sync.url, { cache: 'no-store', headers: { 'Authorization': 'Bearer ' + state.sync.key } });
       if (r.status === 404) return alert('云端还没有数据');
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const j = await r.json(), sync = state.sync;
-      state = j.state; state.sync = Object.assign({}, sync, { lastSync: j.updatedAt || new Date().toLocaleString() });
-      saveState(); alert('已从云恢复'); renderMine();
+      state = j.state;
+      state.sync = Object.assign({}, sync, { lastSync: j.updatedAt || new Date().toLocaleString(),
+                                             pending: false, conflict: false });
+      saveStateRaw(); alert('已从云恢复'); renderMine();
     } catch (e) { alert('恢复失败：' + e.message); }
   };
   $('#btnExport').onclick = () => {
