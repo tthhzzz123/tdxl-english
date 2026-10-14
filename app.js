@@ -30,6 +30,28 @@ function switchTab(name) {
 }
 const CN = (s) => String(s == null ? '' : s);
 
+/* ---------------- 云同步地址：按站点自动选通道（自有域名上线后同源直连） ---------------- */
+const LEGACY_SYNC = 'https://tdxl.tdxl-en.workers.dev/api/sync';
+function isGithubPages() { return (location.hostname || '').endsWith('github.io'); }
+function defaultSyncUrl() {
+  if (location.protocol === 'file:' || !location.hostname) return '';
+  if (isGithubPages()) return LEGACY_SYNC;          // 过渡通道（GitHub Pages 上只能跨域调 Worker）
+  return location.origin + '/api/sync';             // 自有域名 / Worker 上同源直连
+}
+function fixSyncUrl() {
+  if (!state || !state.sync || !state.sync.url) return;
+  if (location.protocol === 'file:' || isGithubPages()) return;
+  if (state.sync.url === LEGACY_SYNC) {             // 域名上线后自动把老地址换掉，无需手动改
+    state.sync.url = location.origin + '/api/sync';
+    saveState();
+  }
+}
+function channelNote() {
+  if (location.protocol === 'file:' || !location.hostname) return '本机文件模式：离线可用，不同步';
+  if (isGithubPages()) return '当前是 GitHub 过渡通道（国内稳定可用），云同步地址将来会随自有域名自动切换';
+  return '当前是自有域名通道：学习记录同源直连云同步';
+}
+
 /* ---------------- 学习活动记录（用于自动判定完成） ---------------- */
 function todayAct() {
   state.activity = state.activity || {};
@@ -837,6 +859,7 @@ function exportCsv() {
 }
 
 function renderMine() {
+  fixSyncUrl();
   const rep = weeklyReport();
   view().innerHTML = `
     ${recordsCard()}
@@ -862,9 +885,10 @@ function renderMine() {
       <div>· <b>每周节奏</b>：周日复制周报给我 → 我按你的正确率重排下周 → 你导入新计划。</div></div>
 
     <div class="card"><h3>云同步（可选）</h3>
-      <div class="muted">填地址和同步码后可在手机/电脑之间同步（不用也能本地学习）。</div>
-      <div class="row" style="margin-top:6px"><input id="syncUrl" placeholder="https://.../api/sync" style="flex:1;min-width:170px" value="${(state.sync && state.sync.url) || ''}">
+      <div class="muted">填地址和同步码后可在手机/电脑之间同步（不用也能本地学习）。地址已按当前站点自动填好，一般只需要填同步码。</div>
+      <div class="row" style="margin-top:6px"><input id="syncUrl" placeholder="https://.../api/sync" style="flex:1;min-width:170px" value="${(state.sync && state.sync.url) || defaultSyncUrl()}">
       <input id="syncKey" type="password" placeholder="同步码" style="width:110px" value="${(state.sync && state.sync.key) || ''}"></div>
+      <div class="muted" style="margin-top:6px">${channelNote()}</div>
       <div class="row" style="margin-top:8px"><button class="btn" id="btnUp">上传到云</button><button class="btn ghost" id="btnDown">从云恢复</button>
       <span class="muted" id="syncMsg">${state.sync && state.sync.lastSync ? '上次同步 ' + state.sync.lastSync : '未同步过'}</span></div></div>
 
