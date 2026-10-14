@@ -1,0 +1,580 @@
+/* 同等学力英语 · 学习台 v0.2 —— 纯前端离线可用；导航：今日 / 练习 / 资料 / 我的 */
+const STATE_KEY = 'tdxl_state_v1';
+const MODE_KEY = 'tdxl_word_mode';
+let CONTENT = null, state = null;
+let tab = 'today', subPractice = 'exam', subMaterials = 'grammar';
+let planOpen = false;
+let pYear = null, pSection = '词汇题', pQuestions = [];
+const SECTIONS = { '词汇题': [1, 10], '口语交际': [13, 22], '阅读理解': [23, 47], '完形填空': [48, 57], '短文完成': [58, 77] };
+
+const $ = (s) => document.querySelector(s);
+const view = () => document.getElementById('view');
+const todayStr = () => new Date().toLocaleDateString('sv-SE');
+
+function loadState() { try { return JSON.parse(localStorage.getItem(STATE_KEY)) || null; } catch (e) { return null; } }
+function saveState() { localStorage.setItem(STATE_KEY, JSON.stringify(state)); }
+function freshState() { return { days: {}, words: {}, answers: {}, created: new Date().toISOString() }; }
+function stripSync(st) { const c = JSON.parse(JSON.stringify(st)); delete c.sync; return c; }
+function daysToExam(d) {
+  const t = new Date(); t.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.round((new Date(d + 'T00:00:00') - t) / 864e5));
+}
+function switchTab(name) {
+  tab = name;
+  document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  render();
+}
+const CN = (s) => String(s == null ? '' : s);
+
+/* ---------------- 学习活动记录（用于自动判定完成） ---------------- */
+function todayAct() {
+  state.activity = state.activity || {};
+  const d = todayStr();
+  state.activity[d] = state.activity[d] || { words: {}, read: {}, writing: {} };
+  const a = state.activity[d];
+  a.words = a.words || {}; a.read = a.read || {}; a.writing = a.writing || {};
+  return a;
+}
+function todayAnswers() {
+  const d = todayStr();
+  return Object.entries(state.answers || {}).filter(([, r]) => r && r.ts && new Date(r.ts).toLocaleDateString('sv-SE') === d);
+}
+/** 自动判定某个任务的完成度：返回 {done, total, status} */
+function taskProgress(t) {
+  const act = todayAct();
+  const ty = t['题型'] || t['类型'] || '';
+  if (ty === '整卷模考') {
+    const n = todayAnswers().length;
+    return { done: Math.min(n, 75), total: 75, status: n === 0 ? 'todo' : n >= 75 ? 'ok' : 'doing' };
+  }
+  if (ty === '语法/考点') {
+    const done = Object.keys(act.read).length;
+    return { done: Math.min(done, 1), total: 1, status: done ? 'ok' : 'todo' };
+  }
+  if (ty === '翻译/写作') {
+    const done = Object.keys(act.writing).length;
+    return { done: Math.min(done, 1), total: 1, status: done ? 'ok' : 'todo' };
+  }
+  if (ty === '错题重做') {
+    const wrong = wrongList().length;
+    if (!wrong) return { done: 1, total: 1, status: 'ok' };
+    const retried = todayAnswers().filter(([qid]) => String(state.answers[qid].retried || 0) && new Date(state.answers[qid].retried).toLocaleDateString('sv-SE') === todayStr()).length;
+    return { done: Math.min(retried, wrong), total: wrong, status: retried >= wrong ? 'ok' : retried ? 'doing' : 'todo' };
+  }
+  const words = t['词表'] || [];
+  if (words.length) {
+    const done = words.filter((w) => act.words[String(w).toLowerCase()]).length;
+    return { done, total: words.length, status: done >= words.length ? 'ok' : done ? 'doing' : 'todo' };
+  }
+  const sec = t['题型'] || '';
+  if (sec && SECTIONS[sec]) {
+    const need = t['题量'] || SECTIONS[sec][1] - SECTIONS[sec][0] + 1;
+    const done = todayAnswers().filter(([qid, r]) => {
+      const [y, no] = String(qid).split(':');
+      const inYear = !t['年份'] || String(t['年份']) === y;
+      const [lo, hi] = SECTIONS[sec] || [1, 999];
+      return inYear && Number(no) >= lo && Number(no) <= hi;
+    }).length;
+    return { done: Math.min(done, need), total: need, status: done >= need ? 'ok' : done ? 'doing' : 'todo' };
+  }
+  return { done: 0, total: 0, status: 'none' };   // 休息/机动等不计入
+}
+
+/* ---------------- 启动 ---------------- */
+async function boot() {
+  state = loadState() || freshState();
+  try {
+    CONTENT = window.__CONTENT__ || await (await fetch('./data/content.json')).json();
+  } catch (e) {
+    view().innerHTML = '<div class="card">内容包加载失败：' + e + '</div>'; return;
+  }
+  if (state.planOverride && state.planOverride['日计划']) CONTENT.plan = state.planOverride;
+  const days = CONTENT.plan['日计划'] || [];
+  $('#topSub').textContent = `距考试 ${daysToExam(CONTENT.plan['考试日期'])} 天（${CONTENT.plan['考试日期']}）｜ 计划 ${CONTENT.plan['起始']} 起 ${days.length} 天`;
+  document.querySelectorAll('.tabs button').forEach((b) => b.onclick = () => switchTab(b.dataset.tab));
+  render();
+}
+
+function render() {
+  if (tab === 'today') renderToday();
+  else if (tab === 'practice') renderPractice();
+  else if (tab === 'materials') renderMaterials();
+  else renderMine();
+}
+
+/* ---------------- 今日 ---------------- */
+function planDay() {
+  const days = CONTENT.plan['日计划'] || [];
+  return days.find((d) => d['日期'] === todayStr()) || days[0] || null;
+}
+function dayState(date) { state.days[date] = state.days[date] || { tasks: {} }; return state.days[date]; }
+
+function taskAction(t) {
+  const ty = t['类型'] || '';
+  if (ty === '新词' || ty === '复习词') return { label: '背词', go: () => openWords(t['词表'] || []) };
+  if (ty === '语法/考点') return { label: '去读', go: () => goMaterialNext() };
+  if (ty === '翻译/写作' || ty === '写作') return { label: '去写作', go: () => goWriting(t['年份']) };
+  if (ty === '错题重做') return { label: '去错题', go: () => { subPractice = 'wrong'; switchTab('practice'); } };
+  if (ty === '整卷模考') return { label: '开考', go: () => goPractice(t['年份'], t['题型'] === '整卷' ? '词汇题' : t['题型']) };
+  if (['词汇题', '精读', '口语交际', '阅读理解', '完形填空', '短文完成'].includes(ty))
+    return { label: '去做题', go: () => goPractice(t['年份'], t['题型'] || ty) };
+  return null;
+}
+/** 直达练习：指定年份与题型并自动开始 */
+function goPractice(year, section) {
+  if (year) pYear = String(year);
+  if (section && SECTIONS[section]) pSection = section;
+  subPractice = 'exam';
+  pQuestions = [];
+  switchTab('practice');
+  const [lo, hi] = SECTIONS[pSection] || [1, 10];
+  pQuestions = (CONTENT.exams[pYear] || []).filter((q) => q.no >= lo && q.no <= hi);
+  renderQuestions();
+}
+/** 直达写作：定位到某年的翻译/写作 */
+function goWriting(year) {
+  subPractice = 'writing';
+  switchTab('practice');
+  if (year) setTimeout(() => {
+    const el = document.getElementById('w-' + year);
+    if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  }, 60);
+}
+/** 直达资料：优先打开第一节未读的语法，其次考点 */
+function goMaterialNext() {
+  const act = todayAct();
+  const grammar = (CONTENT.materials || {}).grammar || [];
+  const next = grammar.find((g) => !act.read['grammar:' + g.index]);
+  subMaterials = next ? 'grammar' : 'tips';
+  switchTab('materials');
+  if (next) setTimeout(() => {
+    const el = document.getElementById('g-' + next.index);
+    if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth', block: 'start' }); act.read['grammar:' + next.index] = Date.now(); saveState(); }
+  }, 60);
+}
+function setSectionFor(ty) {
+  const map = { '词汇题': '词汇题', '精读': '阅读理解', '口语交际': '口语交际', '阅读理解': '阅读理解',
+                '完形填空': '完形填空', '短文完成': '短文完成', '整卷模考': '词汇题' };
+  pSection = map[ty] || '词汇题';
+  pQuestions = [];
+}
+function renderToday() {
+  const day = planDay();
+  if (!day) { view().innerHTML = '<div class="card">计划为空。</div>'; return; }
+  const ds = dayState(day['日期']);
+  const rows = (day['时段'] || []).flatMap((s, si) => (s['任务清单'] || []).map((t, ti) => ({ s, t, si, ti })));
+  const counted = rows.map((r) => taskProgress(r.t)).filter((p) => p.status !== 'none');
+  const done = counted.filter((p) => p.status === 'ok').length;
+  const pct = counted.length ? Math.round(done / counted.length * 100) : 0;
+  const isToday = day['日期'] === todayStr();
+  let html = `<div class="card"><h3>${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+    <div class="muted">已完成 <b>${done}</b> / 未完成 <b>${counted.length - done}</b>（${pct}%）${isToday ? '' : '（当前显示 ' + day['日期'] + ' 的计划）'}<br>
+      <span style="font-size:12px">完成状态由你的实际学习记录自动判定（背完词/做完题/读过资料即自动打勾）</span></div>
+    <div class="row" style="margin-top:8px"><button class="btn ghost" id="btnPlanView">${planOpen ? '收起完整计划' : '查看完整计划'}</button>
+    <span class="muted">${CONTENT.plan['起始']} 起 ${(CONTENT.plan['日计划'] || []).length} 天</span></div>
+    ${planOpen ? planList() : ''}</div>` + firstRunCard();
+  (day['时段'] || []).forEach((s, si) => {
+    html += `<div class="card slot"><h3>${s['名称']} ${s['开始']} · ${s['分钟']} 分钟</h3>`;
+    (s['任务清单'] || []).forEach((t, ti) => {
+      const key = si + '-' + ti, act = taskAction(t), prog = taskProgress(t);
+      const badge = prog.status === 'none'
+        ? '<span class="stat todo">—</span>'
+        : prog.status === 'ok'
+          ? '<span class="stat ok">✓ 已完成</span>'
+          : prog.status === 'doing'
+            ? `<span class="stat doing">进行中 ${prog.done}/${prog.total}</span>`
+            : '<span class="stat todo">未完成</span>';
+      html += `<div class="task" style="${prog.status === 'ok' ? 'opacity:.7' : ''}">
+        <div class="t"><span class="tag">${t['类型']}</span>${CN(t['范围'] || t['内容'])}
+          <div class="muted">${t['预计分钟'] ? t['预计分钟'] + ' 分钟' : ''} ${badge}</div></div>
+        ${act ? `<button class="btn" data-act="${key}">${prog.status === 'ok' ? '再看' : act.label}</button>` : ''}</div>`;
+    });
+    html += '</div>';
+  });
+  view().innerHTML = html;
+  $('#btnPlanView').onclick = () => { planOpen = !planOpen; renderToday(); };
+  const ob = document.getElementById('btnOnboard');
+  if (ob) ob.onclick = () => { localStorage.setItem('tdxl_onboarded', '1'); renderToday(); };
+  rows.forEach((r) => {
+    const act = taskAction(r.t);
+    if (!act) return;
+    const btn = view().querySelector(`button[data-act="${r.si}-${r.ti}"]`);
+    if (btn) btn.onclick = act.go;
+  });
+}
+function planList() {
+  const days = CONTENT.plan['日计划'] || [];
+  const today = todayStr();
+  return `<div style="margin-top:8px">` + days.map((d) => {
+    const n = (d['时段'] || []).reduce((a, s) => a + ((s['任务清单'] || []).length), 0);
+    const main = (d['时段'] || []).flatMap((s) => (s['任务清单'] || []).map((t) => t['类型']))
+      .filter((v, i, arr) => arr.indexOf(v) === i).slice(0, 3).join('、');
+    return `<div class="plan-row ${d['日期'] === today ? 'today' : ''}">
+      <span class="plan-date">${d['日期'].slice(5)} 周${d['星期']}</span>
+      <span class="tag">${d['阶段']}</span>
+      <span class="muted">${d['类型']} ｜ ${n} 项 ｜ ${main || '休息'}</span></div>`;
+  }).join('') + `</div>
+  <div class="hint" style="margin-top:8px">想换计划：把新的 <b>计划-日期.json</b> 用「我的 → 数据 → 导入新计划」导进来即可。</div>`;
+}
+function firstRunCard() {
+  if (localStorage.getItem('tdxl_onboarded')) return '';
+  return `<div class="card" style="border-color:#f1e3b8;background:#fffdf5"><h3>第一次使用（3 步）</h3>
+    <div>1. 下面就是今天的任务，按时间顺序做，做完打勾。</div>
+    <div>2. 每个任务右边都有入口按钮：「背词」「去资料」「去做题」「去写作」。</div>
+    <div>3. 装到手机主屏：用浏览器打开本页 → 菜单选「添加到主屏幕」（iPhone：分享 → 添加到主屏幕）。</div>
+    <div class="row" style="margin-top:8px"><button class="btn" id="btnOnboard">知道了</button></div></div>`;
+}
+
+/* ---------------- 背词（全屏 · 三档 · 双模式） ---------------- */
+const wf = { list: [], idx: 0, mode: 'en2cn', revealed: false, ok: 0, mid: 0, no: 0 };
+function vocabMap() {
+  const m = {};
+  const src = (CONTENT.vocab.learn && CONTENT.vocab.learn.length) ? CONTENT.vocab.learn : (CONTENT.vocab.core || []);
+  src.forEach((w) => { const k = String(w.word).toLowerCase(); if (!m[k]) m[k] = w; });
+  return m;
+}
+function openWords(words) {
+  const m = vocabMap();
+  const list = (words || []).map((w) => m[String(w).toLowerCase()] || { word: w, meaning: '（词库暂未收录，可在真题解析里查）' });
+  if (!list.length) { alert('这一项没有可背的单词（可能已复习完或词表为空）'); return; }
+  wf.list = list; wf.idx = 0; wf.mode = localStorage.getItem(MODE_KEY) || 'en2cn';
+  wf.revealed = false; wf.ok = wf.mid = wf.no = 0;
+  showWord();
+}
+function showWord() {
+  let el = document.getElementById('wordfull');
+  if (!el) { el = document.createElement('div'); el.id = 'wordfull'; el.className = 'wordfull'; document.body.appendChild(el); }
+  if (wf.idx < 0) wf.idx = 0;
+  if (wf.idx >= wf.list.length) { closeWord(); return; }
+  const w = wf.list[wf.idx];
+  const front = wf.mode === 'en2cn'
+    ? `<div class="wf-word">${CN(w.word)}</div><div class="wf-phon">${CN(w.phonetic)}</div>`
+    : `<div class="wf-answer" style="font-size:26px">${CN(w.meaning)}</div>`;
+  const back = wf.revealed
+    ? (wf.mode === 'en2cn'
+        ? `<div class="wf-answer">${CN(w.meaning)}</div>` + (w.examples && w.examples[0] ? `<div class="wf-ex">真题原句：${w.examples[0]}</div>` : '')
+        : `<div class="wf-word" style="margin-top:18px">${CN(w.word)}</div><div class="wf-phon">${CN(w.phonetic)}</div>` +
+          (w.examples && w.examples[0] ? `<div class="wf-ex">真题原句：${w.examples[0]}</div>` : ''))
+    : '';
+  el.innerHTML = `<div class="wf-top">
+      <span>${wf.idx + 1} / ${wf.list.length} ｜ 认识 ${wf.ok} · 模糊 ${wf.mid} · 不认识 ${wf.no}</span>
+      <span><button class="btn ghost" id="wfMode">${wf.mode === 'en2cn' ? '英→中' : '中→英'}</button>
+      <button class="btn ghost" id="wfClose">关闭</button></span></div>
+    <div class="wf-body">${front}${back}
+      ${wf.mode === 'cn2en' && !wf.revealed ? `<input class="wf-input" id="wfInput" placeholder="先在心里/纸上写，再点显示答案">` : ''}
+      ${!wf.revealed ? `<div style="margin-top:18px"><button class="btn" id="wfShow">显示答案</button></div>` : ''}</div>
+    <div class="wf-bottom">
+      <div class="wf-rate">
+        <button class="wf-unknown" data-rate="unknown">不认识</button>
+        <button class="wf-fuzzy" data-rate="fuzzy">模糊</button>
+        <button class="wf-known" data-rate="known">认识</button></div>
+      <div class="wf-nav">
+        <button id="wfPrev" ${wf.idx === 0 ? 'disabled' : ''}>← 上一个</button>
+        <button id="wfNext" ${wf.idx >= wf.list.length - 1 ? 'disabled' : ''}>下一个 →</button></div></div>`;
+  el.classList.add('show');
+  $('#wfClose').onclick = closeWord;
+  $('#wfMode').onclick = () => { wf.mode = wf.mode === 'en2cn' ? 'cn2en' : 'en2cn'; localStorage.setItem(MODE_KEY, wf.mode); wf.revealed = false; showWord(); };
+  const sh = $('#wfShow'); if (sh) sh.onclick = () => { wf.revealed = true; showWord(); };
+  $('#wfPrev').onclick = () => { wf.idx--; wf.revealed = false; showWord(); };
+  $('#wfNext').onclick = () => { wf.idx++; wf.revealed = false; showWord(); };
+  el.querySelectorAll('button[data-rate]').forEach((b) => b.onclick = () => {
+    const w0 = wf.list[wf.idx], k = String(w0.word).toLowerCase();
+    state.words[k] = state.words[k] || { known: 0, fuzzy: 0, unknown: 0 };
+    const kind = b.dataset.rate;
+    state.words[k][kind === 'known' ? 'known' : kind === 'fuzzy' ? 'fuzzy' : 'unknown']++;
+    todayAct().words[k] = kind;                     // 记录今天背过这个词（自动完成用）
+    saveState();
+    if (kind === 'known') wf.ok++; else if (kind === 'fuzzy') wf.mid++; else wf.no++;
+    wf.idx++; wf.revealed = false; showWord();
+  });
+}
+function closeWord() {
+  const el = document.getElementById('wordfull');
+  if (el) el.classList.remove('show');
+  if (wf.ok + wf.mid + wf.no > 0) alert(`本组完成：认识 ${wf.ok} ｜ 模糊 ${wf.mid} ｜ 不认识 ${wf.no}`);
+}
+
+/* ---------------- 练习：真题 / 错题本 / 写作翻译 ---------------- */
+function renderPractice() {
+  const seg = `<div class="seg">
+    <button data-sub="exam" class="${subPractice === 'exam' ? 'active' : ''}">真题</button>
+    <button data-sub="wrong" class="${subPractice === 'wrong' ? 'active' : ''}">错题本</button>
+    <button data-sub="writing" class="${subPractice === 'writing' ? 'active' : ''}">写作翻译</button></div>`;
+  view().innerHTML = seg + (subPractice === 'wrong' ? '' : '');
+  const bindSeg = () => view().querySelectorAll('.seg button').forEach((b) => b.onclick = () => { subPractice = b.dataset.sub; renderPractice(); });
+  bindSeg();
+  if (subPractice === 'exam') renderExam();
+  else if (subPractice === 'wrong') renderWrong();
+  else renderWriting();
+}
+function countOf(year, section) {
+  const [lo, hi] = SECTIONS[section] || [1, 10];
+  return (CONTENT.exams[year] || []).filter((q) => q.no >= lo && q.no <= hi).length;
+}
+function renderExam() {
+  const years = Object.keys(CONTENT.exams).sort();
+  pYear = pYear || years[years.length - 1];
+  const box = document.createElement('div');
+  box.innerHTML = `<div class="card"><h3>真题练习</h3>
+    <div class="row"><select id="selYear">${years.map((y) => `<option ${y === pYear ? 'selected' : ''}>${y}</option>`).join('')}</select>
+    <select id="selSec">${Object.keys(SECTIONS).map((s) => `<option ${s === pSection ? 'selected' : ''}>${s}</option>`).join('')}</select>
+    <button class="btn" id="btnStart">开始</button></div>
+    <div class="muted">${pYear} 年 · ${pSection} 共 ${countOf(pYear, pSection)} 题</div></div><div id="qbox"></div>`;
+  view().appendChild(box);
+  $('#selYear').onchange = (e) => { pYear = e.target.value; renderPractice(); };
+  $('#selSec').onchange = (e) => { pSection = e.target.value; pQuestions = []; renderPractice(); };
+  $('#btnStart').onclick = () => {
+    const [lo, hi] = SECTIONS[pSection] || [1, 10];
+    pQuestions = (CONTENT.exams[pYear] || []).filter((q) => q.no >= lo && q.no <= hi);
+    renderQuestions();
+  };
+  if (pQuestions.length) renderQuestions();
+}
+function renderQuestions() {
+  const box = $('#qbox'); if (!box) return;
+  let lastPassage = null;
+  box.innerHTML = pQuestions.map((q) => {
+    let head = '';
+    if (q.passage && q.passage !== lastPassage) {
+      lastPassage = q.passage;
+      head = `<details class="card passage"><summary>📖 文章原文（${q.passage.length} 字，点开）</summary><div class="ptext">${q.passage}</div></details>`;
+    }
+    const opts = Object.keys(q.options || {}).map((k) => `<button class="opt" data-q="${q.no}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('');
+    return head + `<div class="card q" id="q${q.no}"><div class="muted">第 ${q.no} 题 ｜ ${CN(q.section)}</div>
+      <div>${q.stem}</div>${opts}
+      <div class="muted" id="ans${q.no}" style="display:none">答案：${CN(q.answer)}</div>
+      <div class="explain" id="exp${q.no}" style="display:none">${CN(q.explanation)}</div></div>`;
+  }).join('');
+  box.querySelectorAll('.opt').forEach((b) => b.onclick = () => {
+    const q = pQuestions.find((x) => x.no == b.dataset.q);
+    const ansEl = box.querySelector('#ans' + q.no), expEl = box.querySelector('#exp' + q.no);
+    if (ansEl && ansEl.style.display !== 'none') return;
+    const right = CN(q.answer).trim().toUpperCase().startsWith(b.dataset.k);
+    b.classList.add(right ? 'right' : 'wrong');
+    if (!right) { const g = box.querySelector(`.opt[data-q="${q.no}"][data-k="${CN(q.answer).trim()[0]}"]`); if (g) g.classList.add('right'); }
+    if (ansEl) ansEl.style.display = 'block';
+    if (expEl) expEl.style.display = 'block';
+    state.answers[pYear + ':' + q.no] = { k: b.dataset.k, right, ts: Date.now() };
+    saveState();
+  });
+}
+function findQuestion(qid) {
+  const [year, no] = String(qid).split(':');
+  return (CONTENT.exams[year] || []).find((q) => String(q.no) === String(no)) || null;
+}
+function wrongList() {
+  return Object.entries(state.answers || {})
+    .filter(([, r]) => r && r.right === false && !r.mastered)
+    .map(([qid, r]) => ({ qid, rec: r, q: findQuestion(qid) })).filter((x) => x.q);
+}
+function renderWrong() {
+  const items = wrongList();
+  const card = document.createElement('div');
+  if (!items.length) {
+    card.innerHTML = `<div class="card"><h3>错题本</h3><div class="muted">还没有错题。做错的题会自动进这里（对应计划里「错题重做」）。</div></div>`;
+    view().appendChild(card); return;
+  }
+  card.innerHTML = `<div class="card"><h3>错题本（${items.length} 题）</h3><div class="muted">重做答对一次即自动移出。</div></div>`;
+  view().appendChild(card);
+  items.forEach(({ qid, rec, q }) => {
+    const opts = Object.keys(q.options || {}).map((k) => `<button class="opt" data-wq="${qid}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('');
+    const d = document.createElement('div');
+    d.innerHTML = `<div class="card q"><div class="muted">${qid} ｜ 上次选了 ${CN(rec.k)}（错）</div><div>${q.stem}</div>${opts}
+      <div class="explain">${CN(q.explanation)}</div>
+      <div class="row"><button class="btn ghost" data-master="${qid}">已掌握，移出</button></div></div>`;
+    view().appendChild(d);
+  });
+  view().querySelectorAll('button[data-wq]').forEach((b) => b.onclick = () => {
+    const qid = b.dataset.wq, q = findQuestion(qid);
+    const right = CN(q.answer).trim().toUpperCase().startsWith(b.dataset.k);
+    b.classList.add(right ? 'right' : 'wrong');
+    if (right) { state.answers[qid] = Object.assign({}, state.answers[qid], { right: true, retried: Date.now() }); saveState(); setTimeout(renderPractice, 700); }
+  });
+  view().querySelectorAll('button[data-master]').forEach((b) => b.onclick = () => {
+    state.answers[b.dataset.master] = Object.assign({}, state.answers[b.dataset.master], { mastered: true });
+    saveState(); renderPractice();
+  });
+}
+function renderWriting() {
+  const rows = CONTENT.writing || [];
+  const card = document.createElement('div');
+  if (!rows.length) { card.innerHTML = '<div class="card">写作素材未打包。</div>'; view().appendChild(card); return; }
+  const tr = rows.filter((r) => r.type === '翻译'), wr = rows.filter((r) => r.type === '写作');
+  const item = (r, kind) => `<div class="card q" id="w-${r.year}-${r.type}"><div class="muted">${r.year} 年 ｜ ${r.type}${r.topic ? ' ｜ ' + r.topic : ''}</div>
+    <details class="passage"><summary>📖 题目原文</summary><div class="ptext pre">${CN(r.source)}</div></details>
+    <details class="passage" ${kind === 'writing' ? 'open' : ''}><summary>✅ ${kind === 'writing' ? '参考范文' : '参考译文'}</summary><div class="ptext pre">${CN(r.reference)}</div></details>
+    ${r.notes ? `<details><summary>💡 ${kind === 'writing' ? '审题/结构提示' : '翻译要点'}</summary><div class="ptext pre">${CN(r.notes)}</div></details>` : ''}</div>`;
+  card.innerHTML = `<div class="card"><h3>翻译＋写作（卷面 25 分）</h3><div class="muted">先自己写，再点开对照。建议每周各练 1 篇。</div></div>
+    <div class="card"><h3>英译汉（${tr.length} 篇）</h3></div>${tr.map((r) => item(r, 'translation')).join('')}
+    <div class="card"><h3>写作（${wr.length} 篇）</h3></div>${wr.map((r) => item(r, 'writing')).join('')}`;
+  view().appendChild(card);
+  // 展开范文即记为"今天已练"（自动完成翻译/写作任务）
+  view().querySelectorAll('div[id^="w-"] details').forEach((d) => {
+    d.ontoggle = () => {
+      if (!d.open) return;
+      const host = d.closest('div[id^="w-"]');
+      if (host) { todayAct().writing[host.id.slice(2)] = Date.now(); saveState(); }
+    };
+  });
+}
+
+/* ---------------- 资料：语法 / 考点 ---------------- */
+function renderMaterials() {
+  const m = CONTENT.materials || {}, grammar = m.grammar || [], tips = m.tips || [];
+  const seg = `<div class="seg">
+    <button data-sub="grammar" class="${subMaterials === 'grammar' ? 'active' : ''}">语法（${grammar.length}）</button>
+    <button data-sub="tips" class="${subMaterials === 'tips' ? 'active' : ''}">考点速记（${tips.length}）</button></div>`;
+  view().innerHTML = seg;
+  view().querySelectorAll('.seg button').forEach((b) => b.onclick = () => { subMaterials = b.dataset.sub; renderMaterials(); });
+  const box = document.createElement('div');
+  if (subMaterials === 'grammar') {
+    box.innerHTML = `<div class="card"><h3>语法（${grammar.length} 节）</h3><div class="muted">对应计划 11:30 时段"语法 1 节"。</div></div>` +
+      grammar.map((g) => `<details class="card passage" id="g-${g.index}"><summary>📘 第${g.no}节 ${g.title}</summary><div class="ptext pre">${CN(g.body)}</div></details>`).join('');
+  } else {
+    const chapters = [...new Set(tips.map((t) => t.chapter))];
+    box.innerHTML = `<div class="card"><h3>考点速记（${tips.length} 节）</h3><div class="muted">对应计划 11:30 时段"考点速记 1 个场景"。</div></div>` +
+      chapters.map((ch) => `<div class="card"><h3>${ch}</h3></div>` +
+        tips.filter((t) => t.chapter === ch).map((t) => `<details class="card passage" id="t-${t.index}"><summary>🔖 ${t.title}</summary><div class="ptext pre">${CN(t.body)}</div></details>`).join('')).join('');
+  }
+  view().appendChild(box);
+  // 打开即记为"今天读过"（自动完成 11:30 时段任务）
+  view().querySelectorAll('details').forEach((d) => {
+    d.ontoggle = () => {
+      if (d.open && /^[gt]-\d+$/.test(d.id)) {
+        todayAct().read[d.id] = Date.now();
+        saveState();
+      }
+    };
+  });
+}
+
+/* ---------------- 我的：周报 / 更新 / 同步 / 数据 ---------------- */
+function lastNDates(n) {
+  const out = [];
+  for (let i = n - 1; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); out.push(d.toLocaleDateString('sv-SE')); }
+  return out;
+}
+function weeklyReport() {
+  const dates = lastNDates(7);
+  const rows = dates.map((d) => state.days[d]).filter(Boolean);
+  const studiedDays = rows.filter((r) => Object.values(r.tasks || {}).some(Boolean)).length;
+  const rates = rows.map((r) => { const t = Object.keys(r.tasks || {}).length; return t ? Math.round(Object.values(r.tasks).filter(Boolean).length / t * 100) : null; }).filter((x) => x !== null);
+  const avgCompletion = rates.length ? Math.round(rates.reduce((a, b) => a + b, 0) / rates.length) : null;
+  const since = Date.now() - 7 * 864e5;
+  const week = Object.entries(state.answers || {}).filter(([, r]) => (r.ts || 0) >= since);
+  const bySec = {};
+  week.forEach(([qid, r]) => {
+    const no = parseInt(String(qid).split(':')[1] || '0', 10);
+    const hit = Object.entries(SECTIONS).find(([, rg]) => no >= rg[0] && no <= rg[1]);
+    const key = hit ? hit[0] : '其他';
+    bySec[key] = bySec[key] || { total: 0, right: 0 };
+    bySec[key].total++; if (r.right) bySec[key].right++;
+  });
+  const sections = Object.entries(bySec).map(([name, v]) => ({ name, total: v.total, ratio: Math.round(v.right / v.total * 100) })).sort((a, b) => b.total - a.total);
+  const avgAccuracy = week.length ? Math.round(week.filter(([, r]) => r.right).length / week.length * 100) : null;
+  const known = Object.values(state.words || {}).reduce((a, v) => a + (v.known || 0), 0);
+  const fuzzy = Object.values(state.words || {}).reduce((a, v) => a + (v.fuzzy || 0), 0);
+  const unknown = Object.values(state.words || {}).reduce((a, v) => a + (v.unknown || 0), 0);
+  const tips = [];
+  if (avgAccuracy !== null && avgAccuracy < 60) tips.push('正确率偏低：下周新词减半、复习加倍');
+  else if (avgAccuracy !== null && avgAccuracy > 85) tips.push('正确率很好：下周可加量 25%');
+  if (avgCompletion !== null && avgCompletion < 70) tips.push('完成率不足 70%：先保住晨读 30 分钟不断线，其余按 0.7 缩减');
+  sections.filter((s) => s.total >= 3 && s.ratio < 70).forEach((s) => tips.push(`${s.name} 正确率 ${s.ratio}%：下周每天加 1 次该题型专项`));
+  if (!tips.length) tips.push('各项指标正常，保持节奏；周末可安排整套限时模考');
+  const text = ['【本周学习报告】' + dates[0] + ' ~ ' + dates[6],
+    `有学习记录：${studiedDays}/7 天`, `平均完成率：${avgCompletion === null ? '—' : avgCompletion + '%'}`,
+    `平均正确率：${avgAccuracy === null ? '—' : avgAccuracy + '%'}`,
+    sections.length ? '分题型：' + sections.map((s) => `${s.name} ${s.ratio}%（${s.total} 题）`).join('、') : '分题型：本周无做题记录',
+    `词汇：认识 ${known} ／ 模糊 ${fuzzy} ／ 不认识 ${unknown}`,
+    '建议：' + tips.join('；')].join('\n');
+  return { studiedDays, avgCompletion, avgAccuracy, sections, known, fuzzy, unknown, tips, text };
+}
+function renderMine() {
+  const rep = weeklyReport();
+  view().innerHTML = `
+    <div class="card"><h3>本周报告</h3>
+      <div>有学习记录 <b>${rep.studiedDays}/7</b> 天 ｜ 完成率 <b>${rep.avgCompletion === null ? '—' : rep.avgCompletion + '%'}</b> ｜ 正确率 <b>${rep.avgAccuracy === null ? '—' : rep.avgAccuracy + '%'}</b></div>
+      ${rep.sections.length ? `<div class="muted" style="margin-top:6px">分题型：${rep.sections.map((s) => `${s.name} ${s.ratio}%`).join(' ｜ ')}</div>` : '<div class="muted" style="margin-top:6px">本周还没有做题记录</div>'}
+      <div class="muted" style="margin-top:6px">词汇：认识 ${rep.known} ／ 模糊 ${rep.fuzzy} ／ 不认识 ${rep.unknown}</div>
+      <div style="margin-top:8px">${rep.tips.map((t) => `· ${t}`).join('<br>')}</div>
+      <div class="row" style="margin-top:10px"><button class="btn" id="btnCopyReport">复制本周报告</button></div>
+      <div class="muted" style="margin-top:6px">复制后发我，我据此重排下周计划。</div></div>
+
+    <div class="card"><h3>计划与内容如何更新</h3>
+      <div class="muted">当前计划：<b>${CONTENT.plan['起始']}</b> 起 <b>${(CONTENT.plan['日计划'] || []).length}</b> 天${state.planOverride ? '（已导入）' : '（内置）'}</div>
+      <div style="margin-top:6px">· <b>换计划</b>：我用系统生成新计划文件（计划-日期.json），你在下面「数据 → 导入新计划」选一下即可。</div>
+      <div>· <b>换内容</b>：内容（真题/词库/写作/资料）打包在应用里；单文件版换内容需要我给你新的 html 文件；云托管版我更新后你刷新即可。</div>
+      <div>· <b>每周节奏</b>：周日复制周报给我 → 我按你的正确率重排下周 → 你导入新计划。</div></div>
+
+    <div class="card"><h3>云同步（可选）</h3>
+      <div class="muted">填地址和同步码后可在手机/电脑之间同步（不用也能本地学习）。</div>
+      <div class="row" style="margin-top:6px"><input id="syncUrl" placeholder="https://.../api/sync" style="flex:1;min-width:170px" value="${(state.sync && state.sync.url) || ''}">
+      <input id="syncKey" type="password" placeholder="同步码" style="width:110px" value="${(state.sync && state.sync.key) || ''}"></div>
+      <div class="row" style="margin-top:8px"><button class="btn" id="btnUp">上传到云</button><button class="btn ghost" id="btnDown">从云恢复</button>
+      <span class="muted" id="syncMsg">${state.sync && state.sync.lastSync ? '上次同步 ' + state.sync.lastSync : '未同步过'}</span></div></div>
+
+    <div class="card"><h3>数据</h3>
+      <div class="row"><button class="btn" id="btnExport">导出数据</button><button class="btn ghost" id="btnImport">导入数据</button>
+      <button class="btn ghost" id="btnPlan">导入新计划</button>
+      <input type="file" id="fileIn" style="display:none" accept="application/json">
+      <input type="file" id="planIn" style="display:none" accept="application/json"></div>
+      <div class="muted" style="margin-top:6px">数据只存在这台设备；换手机/清缓存前先导出。</div></div>
+
+    <div class="card"><h3>关于</h3><div class="muted">离线可用｜内容来自你自己的 32 份资料｜考试日期 ${CONTENT.plan['考试日期']}（官方公布前为占位）</div></div>`;
+
+  $('#btnCopyReport').onclick = async () => {
+    try { await navigator.clipboard.writeText(rep.text); alert('已复制，可粘贴发我'); }
+    catch (e) { window.prompt('复制下面这段发我：', rep.text); }
+  };
+  const saveSync = () => { state.sync = { url: $('#syncUrl').value.trim(), key: $('#syncKey').value.trim(), lastSync: (state.sync && state.sync.lastSync) || null }; saveState(); };
+  $('#btnUp').onclick = async () => {
+    saveSync(); if (!state.sync.url || !state.sync.key) return alert('先填地址和同步码');
+    try {
+      const r = await fetch(state.sync.url, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.sync.key }, body: JSON.stringify({ state: stripSync(state) }) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json(); state.sync.lastSync = j.updatedAt || new Date().toLocaleString(); saveState(); $('#syncMsg').textContent = '已上传 ' + state.sync.lastSync;
+    } catch (e) { alert('上传失败：' + e.message); }
+  };
+  $('#btnDown').onclick = async () => {
+    saveSync(); if (!state.sync.url || !state.sync.key) return alert('先填地址和同步码');
+    if (!confirm('用云端数据覆盖本机数据？')) return;
+    try {
+      const r = await fetch(state.sync.url, { headers: { 'Authorization': 'Bearer ' + state.sync.key } });
+      if (r.status === 404) return alert('云端还没有数据');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json(), sync = state.sync;
+      state = j.state; state.sync = Object.assign({}, sync, { lastSync: j.updatedAt || new Date().toLocaleString() });
+      saveState(); alert('已从云恢复'); renderMine();
+    } catch (e) { alert('恢复失败：' + e.message); }
+  };
+  $('#btnExport').onclick = () => {
+    const blob = new Blob([JSON.stringify(state, null, 1)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = '英语学习数据-' + todayStr() + '.json'; a.click();
+  };
+  $('#btnImport').onclick = () => $('#fileIn').click();
+  $('#fileIn').onchange = (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => { try { state = JSON.parse(r.result); saveState(); alert('导入完成'); renderMine(); } catch (err) { alert('导入失败：' + err); } };
+    r.readAsText(f);
+  };
+  $('#btnPlan').onclick = () => $('#planIn').click();
+  $('#planIn').onchange = (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const p = JSON.parse(r.result);
+        if (!p['日计划'] || !p['起始']) throw new Error('不是计划文件');
+        state.planOverride = p; saveState(); CONTENT.plan = p;
+        $('#topSub').textContent = `距考试 ${daysToExam(p['考试日期'])} 天（${p['考试日期']}）｜ 计划 ${p['起始']} 起 ${p['日计划'].length} 天`;
+        alert('新计划已导入：' + p['起始'] + ' 起 ' + p['日计划'].length + ' 天'); switchTab('today');
+      } catch (err) { alert('导入计划失败：' + err.message); }
+    };
+    r.readAsText(f);
+  };
+}
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+boot();
