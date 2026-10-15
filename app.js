@@ -1451,8 +1451,8 @@ function renderMine() {
       <div class="row" style="margin-top:10px"><a class="btn" href="./英语学习提醒.ics" download>下载日历提醒（.ics）</a></div>
       <div class="muted" style="margin-top:6px;font-size:12px">不依赖电脑、不依赖网络；想改时间或加节假日例外，跟我说一句我重新生成。</div></div>
 
-    <div class="card"><h3>云同步（可选）</h3>
-      <div class="muted">开启后<b>全自动</b>：学习记录自动上传、设备间自动一致，不用手动导出导入。地址已自动填好，一般只要填同步码。</div>
+    <div class="card"><h3>上传（学习记录云同步）</h3>
+      <div class="muted">开启后<b>全自动上传</b>：你做过的题、背过的词会自动传到云端，设备间自动一致，不用手动导出导入。地址已自动填好，一般只要填同步码。</div>
       <div class="row" style="margin-top:6px"><input id="syncUrl" placeholder="https://.../api/sync" style="flex:1;min-width:170px" value="${(state.sync && state.sync.url) || defaultSyncUrl()}">
       <input id="syncKey" type="password" placeholder="同步码" style="width:110px" value="${(state.sync && state.sync.key) || ''}"></div>
       <div class="muted" style="margin-top:6px">${channelNote()}</div>
