@@ -921,12 +921,25 @@ function renderExam() {
 }
 function renderQuestions() {
   const box = $('#qbox'); if (!box) return;
+  // 短文完成：按"题干里有没有 58-77 号空"来判断（不要用可能过期的 pSection）
+  if (pQuestions.length && pQuestions.every((q) => q.no >= 58 && q.no <= 77)) return renderDuanwen(pQuestions, box);
   let lastPassage = null;
   box.innerHTML = pQuestions.map((q, i) => {
     let head = '';
     if (q.passage && q.passage !== lastPassage) {
       lastPassage = q.passage;
-      head = `<details class="card passage"><summary>📖 文章原文（${q.passage.length} 字，点开）</summary><div class="ptext">${q.passage}</div></details>`;
+      const yr = String(q.yr || pYear || '');
+      const ls = ((CONTENT.materials || {}).longSentences || {})[yr] || [];
+      head = `<details class="card passage"><summary>📖 文章原文（${q.passage.length} 字，点开）</summary><div class="ptext">${q.passage}</div>
+        ${ls.length ? `<details class="card passage" style="margin-top:8px;background:#f6fbff"><summary>🧩 长难句解析（${ls.length} 句 · 点开才显示）</summary>
+          ${ls.map((x, i) => `<details style="margin-top:8px;border-top:1px dashed var(--line2);padding-top:6px">
+            <summary style="cursor:pointer;font-size:14px">第 ${i + 1} 句：${CN(x.sentence).slice(0, 46)}…</summary>
+            <div style="margin-top:6px;font-size:14px;line-height:1.7"><b>原句：</b>${CN(x.sentence)}</div>
+            <div class="hint" style="margin-top:6px"><b>断句</b>：${CN(x.split)}</div>
+            <div class="muted" style="margin-top:4px"><b>主干</b>：${CN(x.core)}</div>
+            <div class="muted" style="margin-top:4px"><b>难点</b>：${CN(x.trap)}</div>
+            <div class="hint" style="margin-top:6px"><b>参考译文</b>：${CN(x.translation)}</div></details>`).join('')}
+        </details>` : ''}</details>`;
     }
     const opts = Object.keys(q.options || {}).map((k) => `<button class="opt" data-q="${i}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('');
     return head + `<div class="card q" id="q${i}"><div class="muted">第 ${i + 1} 题 ｜ ${CN(q.section)}${q.yr ? ' ｜ 真题 ' + q.yr + ' 年第 ' + q.no + ' 题' : ''}</div>
@@ -951,6 +964,74 @@ function renderQuestions() {
       else if (prev && prev.right === false) logWrong({ qid, k: b.dataset.k, right: true, corrected: true, src: 'practice', q });
     }
     saveState();
+  });
+}
+/* ---------------- 短文完成：三词 → 三短语 → 填进文章（专用界面） ---------------- */
+function renderDuanwen(qs, box) {
+  // 一篇短文完成通常有 2~3 段原文，每段自带一批空 → 按题干原文分组渲染
+  const groups = [];
+  qs.forEach((q) => {
+    const p = CN(q.passage || '');
+    let g = groups.find((x) => x.raw === p);
+    if (!g) { g = { raw: p, qs: [] }; groups.push(g); }
+    g.qs.push(q);
+  });
+  box.innerHTML = `<div class="card q"><h3>短文完成（三步走 · 共 ${groups.length} 段原文）</h3>
+    <div class="hint">①先把<b>三个词</b>填进三个短语；②再把<b>短语</b>填进文章的编号空。选完点「对答案」，错题自动进错题本。</div>
+    ${groups.map((g, gi) => `<div style="margin-top:14px">
+      <div class="muted"><b>第 ${gi + 1} 段${groups.length > 1 ? '（原文 ' + (gi + 1) + '/' + groups.length + '）' : ''}</b></div>
+      <div class="dwSec" data-g="${gi}"></div>
+      <div class="row" style="margin-top:8px"><button class="btn" data-dwcheck="${gi}">对答案</button>
+        <button class="btn ghost" data-dwreveal="${gi}">看答案</button>
+        <span class="muted" data-dwmsg="${gi}"></span></div></div>`).join('')}</div>`;
+  groups.forEach((g, gi) => {
+    const byBlank = {};
+    g.qs.forEach((q) => { byBlank[Math.max(1, q.no - 2)] = q; });      // 题号 58 ↔ 空 (56)
+  const sel = (no) => {
+    const q = byBlank[no];
+    if (!q) return `<b>(${no}) ____</b>`;
+    return `<select data-blank="${no}" style="min-height:34px;padding:4px 8px;font-size:13px;margin:0 2px">
+      <option value="">(${no}) 选…</option>
+      ${Object.entries(q.options || {}).map(([k, v]) => `<option value="${k}">${k}. ${CN(v).slice(0, 26)}</option>`).join('')}
+    </select>`;
+  };
+    const blanks = [...new Set((g.raw.match(/\((\d+)\)/g) || []).map((s) => Number(s.replace(/\D/g, ''))))].sort((a, b) => a - b);
+    const cut = blanks.find((n) => n >= 59);
+    let step1 = g.raw, step2 = '';
+    if (cut) {
+      const idx = g.raw.search(new RegExp("\\(" + cut + "\\)"));
+      // 从"第一个文章空"往前找该段之前的换行/短语结束位置
+      step1 = g.raw.slice(0, idx);
+      step2 = g.raw.slice(idx);
+    }
+    const html = `<div class="muted" style="margin-top:6px"><b>第 1 步 · 短语补词</b></div>
+      <div class="ptext" style="margin-top:4px;border:1px solid var(--line);border-radius:10px;padding:10px">${step1.replace(/\((\d+)\)\s*_*/g, (m, n) => sel(Number(n)))}</div>
+      ${step2 ? `<div class="muted" style="margin-top:10px"><b>第 2 步 · 把短语填进原文</b></div>
+        <div class="ptext" style="margin-top:4px;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:50vh;overflow:auto">${step2.replace(/\((\d+)\)\s*_*/g, (m, n) => sel(Number(n)))}</div>` : ''}`;
+    box.querySelector(`.dwSec[data-g="${gi}"]`).innerHTML = html;
+  const mark = (reveal) => {
+    let right = 0, total = 0;
+    box.querySelectorAll(`.dwSec[data-g="${gi}"] select[data-blank]`).forEach((s) => {
+      const q = byBlank[Number(s.dataset.blank)];
+      if (!q) return;
+      total++;
+      const ans = String(q.answer || '').trim().toUpperCase()[0];
+      if (reveal && !s.value) s.value = ans;
+      const ok = s.value === ans;
+      s.style.borderColor = ok ? 'var(--ok)' : 'var(--bad)';
+      s.style.background = ok ? '#f1fbf5' : '#fdf3f2';
+      if (s.value) {
+        const qid = qidOf(q, pYear);
+        state.answers[qid] = { k: s.value, right: ok, ts: Date.now() };
+        if (!ok) logWrong({ qid, k: s.value, src: 'practice', q });
+        else right++;
+      }
+    });
+    saveState();
+    box.querySelector(`[data-dwmsg="${gi}"]`).textContent = `已判 ${total} 空 ｜ 对 ${right} 空（错的已进错题本）`;
+  };
+    box.querySelector(`[data-dwcheck="${gi}"]`).onclick = () => mark(false);
+    box.querySelector(`[data-dwreveal="${gi}"]`).onclick = () => mark(true);
   });
 }
 function findQuestion(qid) {
