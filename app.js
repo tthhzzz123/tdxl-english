@@ -1028,6 +1028,24 @@ function renderQuestions() {
   // 短文完成：按"题干里有没有 58-77 号空"来判断（不要用可能过期的 pSection）
   if (pQuestions.length && pQuestions.every((q) => q.no >= 58 && q.no <= 77)) return renderDuanwen(pQuestions, box);
   let lastPassage = null;
+  /* 共享题干题（口语交际/完形填空）的题库题干常常只有一个「_____.」，看起来像"缺题干"。
+     这里按"同一段原文里的第几个空"补出：空号 + 该空前后的上下文，让题干自身可读（2026-10-16 修）。 */
+  const localSeen = {};
+  const stemHtml = (q, li) => {
+    let stem = String(q.stem || '').replace(/^【[^】]*】\s*/, '');
+    const bare = stem.replace(/第?\s*[（(]\s*\d*\s*[)）]?\s*(选择)?\s*_+/g, '').replace(/[_\.\s]/g, '');
+    const raw = CN(q.passage || '');
+    const marks = [...raw.matchAll(/\((\d{1,3})\)\s*_+/g)];
+    const mk = marks[li - 1];
+    if (!bare && mk) {
+      const at = mk.index || 0;
+      const before = raw.slice(Math.max(0, at - 46), at).replace(/\s+/g, ' ').trim();
+      const after = raw.slice(at + mk[0].length, at + mk[0].length + 46).replace(/\s+/g, ' ').trim();
+      return `<div>填空 <b>(${mk[1]})</b>：从选项里选一句填进原文（第 ${q.no} 题）</div>
+        <div class="hint" style="margin-top:4px;line-height:1.75">…${before} <b>(${mk[1]}) _____</b> ${after}…</div>`;
+    }
+    return stem;
+  };
   box.innerHTML = pQuestions.map((q, i) => {
     let head = '';
     if (q.passage && q.passage !== lastPassage && pSection !== '词汇题') {   // 词汇题不显示"原文"（原卷也没有）
@@ -1036,7 +1054,15 @@ function renderQuestions() {
       const fp = CN(q.passage).replace(/\s+/g, ' ').trim().slice(0, 60);      // 段落指纹
       const lsObj = (((CONTENT.materials || {}).longSentences || {})[yr]) || null;
       const ls = (lsObj && lsObj.fp === fp) ? (lsObj.items || []) : [];       // 精析只挂它对应的那一段
-      const auto = (((CONTENT.materials || {}).longSentencesAuto || {})[yr] || {})[pSection] || [];
+      // 2026-10-16 修：自动长难句是按「年份+题型」汇总的（阅读理解一年 5 段会混在一起）→
+      // 只保留"确实出现在这一段原文里"的句子，做到解析与原文一一对应
+      const pNorm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const passNorm = pNorm(q.passage);
+      const autoAll = (((CONTENT.materials || {}).longSentencesAuto || {})[yr] || {})[pSection] || [];
+      const auto = autoAll.filter((x) => {
+        const sen = pNorm(x.sentence);
+        return !sen || passNorm.indexOf(sen.slice(0, 50)) >= 0;
+      });
       const tr = ((((CONTENT.materials || {}).passageTranslation || {})[yr]) || {})[fp] || '';
       const uid = 'ps' + Math.random().toString(36).slice(2, 8);
       // 选项块独立成卡（2026-10-16：原来塞在原文卡里面，用户反馈"选项混进了原文"）
@@ -1046,29 +1072,30 @@ function renderQuestions() {
         : '';
       const optBlock = optLines ? `<div class="card"><b>选项</b><span class="muted" style="font-size:12px">（先扫一眼这三句，再去下面的原文里对号）</span>
         <div class="hint" style="margin-top:4px;line-height:1.9">${optLines}</div></div>` : '';
-      head = optBlock + `<details class="card passage stickyPassage" id="${uid}"><summary>${pSection} ｜ 原文 ${q.passage.length} 字 ／ 长难句 ${auto.length + ls.length} 句（点开后可一直停在顶部）</summary>
+      // 共享题干题型（口语交际/阅读理解/完形填空）默认展开原文：否则只看得到「第（1）选择____.」会像"缺题干"
+      const openAttr = (pSection === '口语交际' || pSection === '阅读理解' || pSection === '完形填空') ? 'open' : '';
+      head = optBlock + `<details class="card passage stickyPassage" id="${uid}" ${openAttr}><summary>${pSection} ｜ 原文 ${q.passage.length} 字 ／ 长难句 ${auto.length + ls.length} 句（原文框内可上下滑动）</summary>
         <div class="row" style="margin-top:8px"><button class="btn ghost" data-pv="raw" data-uid="${uid}">原文</button>
           <button class="btn ghost" data-pv="parse" data-uid="${uid}">长难句解析</button>
-          ${tr ? `<button class="btn ghost" data-pv="trans" data-uid="${uid}">全文译文</button>` : ''}</div>
+          ${tr ? `<button class="btn ghost" data-pv="trans" data-uid="${uid}">全文译文</button>`
+               : `<span class="muted" style="font-size:12px;align-self:center">本篇暂无官方全文翻译</span>`}</div>
         <div data-pane="raw">
-          <div class="ptext">${q.passage}</div></div>
+          <div class="ptext" style="max-height:52vh;overflow:auto">${q.passage}</div></div>
         <div data-pane="trans" style="display:none">
-          <div class="ptext pre" style="margin-top:6px">${CN(tr)}</div>
+          <div class="ptext pre" style="margin-top:6px;max-height:52vh;overflow:auto">${CN(tr)}</div>
           <div class="muted" style="font-size:12px;margin-top:6px">译自题库解析，供对照；有出入以你的理解为准。</div></div>
-        <div data-pane="parse" style="display:none">
-          ${ls.length ? `<div class="muted" style="margin-top:6px"><b>人工精析（含译文）</b></div>
-            ${ls.map((x, i) => `<details style="margin-top:6px;border-top:1px dashed var(--line2);padding-top:6px">
-              <summary style="cursor:pointer;font-size:14px">精析 ${i + 1}：${CN(x.sentence).slice(0, 44)}…</summary>
-              <div style="margin-top:6px;font-size:14px;line-height:1.7"><b>原句：</b>${CN(x.sentence)}</div>
-              <div class="hint" style="margin-top:6px"><b>断句</b>：${CN(x.split)}</div>
-              <div class="muted" style="margin-top:4px"><b>主干</b>：${CN(x.core)}</div>
-              <div class="muted" style="margin-top:4px"><b>难点</b>：${CN(x.trap)}</div>
-              <div class="hint" style="margin-top:6px"><b>参考译文</b>：${CN(x.translation)}</div></details>`).join('')}` : ''}
-          ${auto.length ? `<div class="muted" style="margin-top:10px"><b>全文结构分析（4 步法：标句 → 找主干 → 划从句/短语 → 还原语序）· ${auto.length} 句</b></div>
-            ${auto.map((x, i) => `<details style="margin-top:6px;border-top:1px dashed var(--line2);padding-top:6px">
-              <summary style="cursor:pointer;font-size:14px">${i + 1}. <span class="tag">${CN(x.level)} ${x.words} 词</span> ${CN(x.sentence).slice(0, 40)}…</summary>
-              <div style="margin-top:6px;font-size:14px;line-height:1.7"><b>原句：</b>${CN(x.sentence)}</div>
-              <div class="hint" style="margin-top:6px"><b>意群切分</b>：${CN(x.split)}</div>
+        <div data-pane="parse" style="display:none;max-height:58vh;overflow:auto">
+           ${ls.length ? `<div class="muted" style="margin-top:6px"><b>人工精析（意群切分 + 主干 + 难点 + 译文）</b></div>
+             ${ls.map((x, i) => `<details style="margin-top:6px;border-top:1px dashed var(--line2);padding-top:6px">
+               <summary style="cursor:pointer;font-size:14px">精析 ${i + 1}（点开看断句与分析）</summary>
+               <div class="hint" style="margin-top:6px"><b>意群切分</b>：${CN(x.split)}</div>
+               <div class="muted" style="margin-top:4px"><b>主干</b>：${CN(x.core)}</div>
+               <div class="muted" style="margin-top:4px"><b>难点</b>：${CN(x.trap)}</div>
+               <div class="hint" style="margin-top:6px"><b>参考译文</b>：${CN(x.translation)}</div></details>`).join('')}` : ''}
+           ${auto.length ? `<div class="muted" style="margin-top:10px"><b>全文结构分析（4 步法：标句 → 找主干 → 划从句/短语 → 还原语序）· ${auto.length} 句</b></div>
+             ${auto.map((x, i) => `<details style="margin-top:6px;border-top:1px dashed var(--line2);padding-top:6px">
+               <summary style="cursor:pointer;font-size:14px">${i + 1}. <span class="tag">${CN(x.level)} ${x.words} 词</span>（点开看切分与分析）</summary>
+               <div class="hint" style="margin-top:6px"><b>意群切分</b>：${CN(x.split)}</div>
               ${(x.clauses || []).length ? `<div class="muted" style="margin-top:4px"><b>从句/连接词</b>：${x.clauses.map((c) => c.word + '（' + c.type + '）').join('、')}</div>` : ''}
               <div class="muted" style="margin-top:4px"><b>主干（自动）</b>：${CN(x.core)}</div>
               ${(x.vocab || []).length ? `<div class="muted" style="margin-top:4px"><b>句中重点词</b>：${x.vocab.map((v) => v.word + ' ' + CN(v.meaning).slice(0, 18)).join('；')}</div>` : ''}
@@ -1076,9 +1103,11 @@ function renderQuestions() {
           ${!ls.length && !auto.length ? '<div class="muted" style="margin-top:6px">这段原文暂无长难句分析。</div>' : ''}
         </div></details>`;
     }
+    const sameKey = CN(q.passage || '') || ('__' + i);
+    localSeen[sameKey] = (localSeen[sameKey] || 0) + 1;
     const opts = Object.keys(q.options || {}).map((k) => `<button class="opt" data-q="${i}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('');
     return head + `<div class="card q" id="q${i}"><div class="muted">第 ${i + 1} 题 ｜ ${CN(q.section)}${q.yr ? ' ｜ 真题 ' + q.yr + ' 年第 ' + q.no + ' 题' : ''}</div>
-      <div>${q.stem}</div>${opts}
+      <div>${stemHtml(q, localSeen[sameKey])}</div>${opts}
       <div class="muted" id="ans${i}" style="display:none">答案：${CN(q.answer)}</div>
       <div class="explain" id="exp${i}" style="display:none">${CN(q.explanation)}</div></div>`;
   }).join('');
@@ -1086,8 +1115,10 @@ function renderQuestions() {
   box.querySelectorAll('[data-pv]').forEach((b) => b.onclick = () => {
     const host = document.getElementById(b.dataset.uid);
     if (!host) return;
-    const show = b.dataset.pv === 'parse' ? 'parse' : 'raw';
+    // 2026-10-16 修：原来这里把 trans 也当成 raw → 点「全文译文」没反应（用户反馈）
+    const show = b.dataset.pv;
     host.querySelectorAll('[data-pane]').forEach((p) => p.style.display = (p.dataset.pane === show ? 'block' : 'none'));
+    host.querySelectorAll('[data-pv]').forEach((x) => x.classList.toggle('on', x === b));
   });
   box.querySelectorAll('.opt').forEach((b) => b.onclick = () => {
     const i = +b.dataset.q, q = pQuestions[i];
@@ -1134,6 +1165,12 @@ function renderDuanwen(qs, box) {
     const pick = {};                                   // 第一步当前选择：{A:'B', ...}
     const host = box.querySelector(`[data-dwt="${gi}"]`);
     if (!host) return;
+    // 该段的全文译文（按"原始原文"的段落指纹取；短文完成现在正文是整理过的，指纹要用题库里的原始 passage）
+    const q0 = byNo[String(((t['短语项'] || [])[0] || {})['题号'])];
+    const rawPass = (q0 && q0.passage) || '';
+    const fpKey = CN(rawPass).replace(/\s+/g, ' ').trim().slice(0, 60);
+    const trY = ((CONTENT.materials || {}).passageTranslation || {})[pYear] || {};
+    const trText = fpKey ? (trY[fpKey] || '') : '';
     const firstQ = (t['短语项'] || []).map((x) => x['题号']).filter(Boolean);
     const secondQ = (t['正文题'] || []).map((x) => x['题号']).filter(Boolean);
     const boxWords = (t['框内选项'] || []).length
@@ -1167,6 +1204,10 @@ function renderDuanwen(qs, box) {
       ${step1}
       <div class="muted" style="margin-top:12px"><b>第二步 · 把补全后的短语填进正文</b></div>
       <div class="ptext" style="margin-top:4px;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:52vh;overflow:auto">${bodyHtml}</div>
+      <div class="row" style="margin-top:8px">${trText
+        ? `<button class="btn ghost" data-dwtrans="${gi}">全文译文</button>`
+        : '<span class="muted" style="font-size:12px">本篇暂无官方全文翻译</span>'}</div>
+      ${trText ? `<div class="ptext pre" data-dwpane="${gi}" style="display:none;margin-top:6px;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:52vh;overflow:auto">${CN(trText)}</div>` : ''}
       <div class="row" style="margin-top:8px"><button class="btn" data-dwcheck="${gi}">对答案</button>
         <button class="btn ghost" data-dwreveal="${gi}">看答案</button>
         <span class="muted" data-dwmsg="${gi}"></span></div>
@@ -1237,6 +1278,13 @@ function renderDuanwen(qs, box) {
       if (r) r.onclick = () => mark(true);
     };
     bind();
+    const tb = host.querySelector(`[data-dwtrans="${gi}"]`);
+    const tp = host.querySelector(`[data-dwpane="${gi}"]`);
+    if (tb && tp) tb.onclick = () => {
+      const on = tp.style.display !== 'none';
+      tp.style.display = on ? 'none' : 'block';
+      tb.classList.toggle('on', !on);
+    };
   };
 
   box.innerHTML = `<div class="card q"><h3>短文完成 · ${dwAll.length} 段 · 共 ${pQuestions.length} 题</h3>
