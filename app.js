@@ -926,7 +926,7 @@ function renderQuestions() {
   let lastPassage = null;
   box.innerHTML = pQuestions.map((q, i) => {
     let head = '';
-    if (q.passage && q.passage !== lastPassage) {
+    if (q.passage && q.passage !== lastPassage && pSection !== '词汇题') {   // 词汇题不显示"原文"（原卷也没有）
       lastPassage = q.passage;
       const yr = String(q.yr || pYear || '');
       const ls = ((CONTENT.materials || {}).longSentences || {})[yr] || [];
