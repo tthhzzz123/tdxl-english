@@ -938,18 +938,34 @@ function renderQuestions() {
       lastPassage = q.passage;
       const yr = String(q.yr || pYear || '');
       const ls = ((CONTENT.materials || {}).longSentences || {})[yr] || [];
-      head = `<details class="card passage stickyPassage"><summary>📖 原文（${q.passage.length} 字 · 点开后可一直停在顶部）</summary>
-        ${q.passageOptions ? `<div class="hint" style="margin-top:6px"><b>选项</b>：${CN(q.passageOptions)}</div>` : ''}
-        <div class="ptext">${q.passage}</div>
-        ${ls.length ? `<details class="card passage" style="margin-top:8px;background:#f6fbff"><summary>🧩 长难句解析（${ls.length} 句 · 点开才显示）</summary>
-          ${ls.map((x, i) => `<details style="margin-top:8px;border-top:1px dashed var(--line2);padding-top:6px">
-            <summary style="cursor:pointer;font-size:14px">第 ${i + 1} 句：${CN(x.sentence).slice(0, 46)}…</summary>
-            <div style="margin-top:6px;font-size:14px;line-height:1.7"><b>原句：</b>${CN(x.sentence)}</div>
-            <div class="hint" style="margin-top:6px"><b>断句</b>：${CN(x.split)}</div>
-            <div class="muted" style="margin-top:4px"><b>主干</b>：${CN(x.core)}</div>
-            <div class="muted" style="margin-top:4px"><b>难点</b>：${CN(x.trap)}</div>
-            <div class="hint" style="margin-top:6px"><b>参考译文</b>：${CN(x.translation)}</div></details>`).join('')}
-        </details>` : ''}</details>`;
+      const auto = (((CONTENT.materials || {}).longSentencesAuto || {})[yr] || {})[pSection] || [];
+      const uid = 'ps' + Math.random().toString(36).slice(2, 8);
+      head = `<details class="card passage stickyPassage" id="${uid}"><summary>${pSection} ｜ 原文 ${q.passage.length} 字 ／ 长难句 ${auto.length + ls.length} 句（点开后可一直停在顶部）</summary>
+        <div class="row" style="margin-top:8px"><button class="btn ghost" data-pv="raw" data-uid="${uid}">原文</button>
+          <button class="btn ghost" data-pv="parse" data-uid="${uid}">长难句解析</button></div>
+        <div data-pane="raw">
+          ${q.passageOptions ? `<div class="hint" style="margin-top:6px"><b>选项</b>：${CN(q.passageOptions)}</div>` : ''}
+          <div class="ptext">${q.passage}</div></div>
+        <div data-pane="parse" style="display:none">
+          ${ls.length ? `<div class="muted" style="margin-top:6px"><b>人工精析（含译文）</b></div>
+            ${ls.map((x, i) => `<details style="margin-top:6px;border-top:1px dashed var(--line2);padding-top:6px">
+              <summary style="cursor:pointer;font-size:14px">精析 ${i + 1}：${CN(x.sentence).slice(0, 44)}…</summary>
+              <div style="margin-top:6px;font-size:14px;line-height:1.7"><b>原句：</b>${CN(x.sentence)}</div>
+              <div class="hint" style="margin-top:6px"><b>断句</b>：${CN(x.split)}</div>
+              <div class="muted" style="margin-top:4px"><b>主干</b>：${CN(x.core)}</div>
+              <div class="muted" style="margin-top:4px"><b>难点</b>：${CN(x.trap)}</div>
+              <div class="hint" style="margin-top:6px"><b>参考译文</b>：${CN(x.translation)}</div></details>`).join('')}` : ''}
+          ${auto.length ? `<div class="muted" style="margin-top:10px"><b>全文结构分析（4 步法：标句 → 找主干 → 划从句/短语 → 还原语序）· ${auto.length} 句</b></div>
+            ${auto.map((x, i) => `<details style="margin-top:6px;border-top:1px dashed var(--line2);padding-top:6px">
+              <summary style="cursor:pointer;font-size:14px">${i + 1}. <span class="tag">${CN(x.level)} ${x.words} 词</span> ${CN(x.sentence).slice(0, 40)}…</summary>
+              <div style="margin-top:6px;font-size:14px;line-height:1.7"><b>原句：</b>${CN(x.sentence)}</div>
+              <div class="hint" style="margin-top:6px"><b>意群切分</b>：${CN(x.split)}</div>
+              ${(x.clauses || []).length ? `<div class="muted" style="margin-top:4px"><b>从句/连接词</b>：${x.clauses.map((c) => c.word + '（' + c.type + '）').join('、')}</div>` : ''}
+              <div class="muted" style="margin-top:4px"><b>主干（自动）</b>：${CN(x.core)}</div>
+              ${(x.vocab || []).length ? `<div class="muted" style="margin-top:4px"><b>句中重点词</b>：${x.vocab.map((v) => v.word + ' ' + CN(v.meaning).slice(0, 18)).join('；')}</div>` : ''}
+              ${x.translation ? `<div class="hint" style="margin-top:6px"><b>参考译文</b>：${CN(x.translation)}</div>` : ''}</details>`).join('')}` : ''}
+          ${!ls.length && !auto.length ? '<div class="muted" style="margin-top:6px">这段原文暂无长难句分析。</div>' : ''}
+        </div></details>`;
     }
     const opts = Object.keys(q.options || {}).map((k) => `<button class="opt" data-q="${i}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('');
     return head + `<div class="card q" id="q${i}"><div class="muted">第 ${i + 1} 题 ｜ ${CN(q.section)}${q.yr ? ' ｜ 真题 ' + q.yr + ' 年第 ' + q.no + ' 题' : ''}</div>
@@ -957,6 +973,13 @@ function renderQuestions() {
       <div class="muted" id="ans${i}" style="display:none">答案：${CN(q.answer)}</div>
       <div class="explain" id="exp${i}" style="display:none">${CN(q.explanation)}</div></div>`;
   }).join('');
+  /* 原文 ⇄ 长难句解析 切换 */
+  box.querySelectorAll('[data-pv]').forEach((b) => b.onclick = () => {
+    const host = document.getElementById(b.dataset.uid);
+    if (!host) return;
+    const show = b.dataset.pv === 'parse' ? 'parse' : 'raw';
+    host.querySelectorAll('[data-pane]').forEach((p) => p.style.display = (p.dataset.pane === show ? 'block' : 'none'));
+  });
   box.querySelectorAll('.opt').forEach((b) => b.onclick = () => {
     const i = +b.dataset.q, q = pQuestions[i];
     const ansEl = box.querySelector('#ans' + i), expEl = box.querySelector('#exp' + i);
