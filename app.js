@@ -3,6 +3,7 @@ const STATE_KEY = 'tdxl_state_v1';
 const MODE_KEY = 'tdxl_word_mode';
 let CONTENT = null, state = null;
 let tab = 'today', subPractice = 'exam', subMaterials = 'tips';
+const REVIEW_STEPS = [3, 7, 15, 30];       // 连续答对的复习间隔（天）：3 → 7 → 15 → 30
 let planOpen = false;
 let recordsOpen = false;
 let pYear = null, pSection = '词汇题', pQuestions = [];
@@ -177,6 +178,7 @@ function taskProgress(t) { return taskProgressAt(todayStr(), t); }
 /* ---------------- 内容版本：后台改完计划/内容 → 手机一键更新 / 打开自动更新 ---------------- */
 let updNote = '';
 let lastAutoCheck = 0;
+let wordSummary = '';
 let analysis = null, analysisMsg = '', lastAnalysisAt = 0;
 try { analysis = JSON.parse(localStorage.getItem('tdxl_analysis')) || null; } catch (e) { analysis = null; }
 function analysisUrl() {
@@ -363,7 +365,9 @@ function dashboardCard(day, rows, done) {
 
 function taskAction(t) {
   const ty = t['类型'] || '';
-  if (ty === '新词' || ty === '复习词') return { label: '背词', go: () => openWords(t['词表'] || []) };
+  if (ty === '新词') return { label: '背词', go: () => openWords(t['词表'] || []) };
+  if (ty === '复习词') return { label: '背词', go: () => openWords([...new Set([
+    ...dueWords().map((w) => w.word), ...(t['词表'] || [])])]) };   // 计划的复习词 + 到期该复习的词，一起去重
   if (ty === '语法/考点' || ty === '考点速记') return { label: '去读', go: () => goTipsNext() };
   if (ty === '翻译/写作' || ty === '写作') return { label: '去写作', go: () => goWriting(t['年份']) };
   if (ty === '错题重做') return { label: '去错题', go: () => { subPractice = 'wrong'; switchTab('practice'); } };
@@ -420,7 +424,7 @@ function renderToday() {
   const done = counted.filter((p) => p.status === 'ok').length;
   const pct = counted.length ? Math.round(done / counted.length * 100) : 0;
   const isToday = day['日期'] === todayStr();
-  let html = updateBar() + dashboardCard(day, rows, done) + analysisCard() + `<div class="card"><h3>${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
+  let html = updateBar() + reviewBar() + dashboardCard(day, rows, done) + analysisCard() + `<div class="card"><h3>${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
     <div class="bar"><i style="width:${pct}%"></i></div>
     <div class="muted">已完成 <b>${done}</b> / 未完成 <b>${counted.length - done}</b>（${pct}%）${isToday ? '' : '（当前显示 ' + day['日期'] + ' 的计划）'}<br>
       <span style="font-size:12px">完成状态由你的实际学习记录自动判定（背完词/做完题/读过资料即自动打勾）</span></div>
@@ -455,6 +459,8 @@ function renderToday() {
   const dashExam = document.getElementById('btnDashExam');
   if (dashExam) dashExam.onclick = () => { subPractice = 'testing'; switchTab('practice'); };
   const anRefresh = document.getElementById('btnAnalysisRefresh');
+  const revBtn = document.getElementById('btnReview');
+  if (revBtn) revBtn.onclick = () => openWords(dueWords().map((w) => w.word));
   if (anRefresh) anRefresh.onclick = () => { analysisMsg = '正在按最新记录重算…'; renderToday(); fetchAnalysis(true); };
   const anCopy = document.getElementById('btnAnalysisCopy');
   if (anCopy) anCopy.onclick = async () => {
@@ -510,6 +516,25 @@ function openWords(words) {
   wf.revealed = false; wf.ok = wf.mid = wf.no = 0;
   showWord();
 }
+/** 今日该复习的词（自适应：不认识的当天回来、模糊 2 天、认识 3/7/15/30 天） */
+function dueWords() {
+  const today = todayStr();
+  const m = vocabMap();
+  return Object.entries(state.words || {})
+    .filter(([, v]) => v && v.nextDue && v.nextDue <= today)
+    .sort((a, b) => (a[1].nextDue < b[1].nextDue ? -1 : a[1].nextDue > b[1].nextDue ? 1 : 0))
+    .map(([k]) => m[k] || { word: k, meaning: '（词库暂未收录）' });
+}
+function reviewBar() {
+  const due = dueWords();
+  const total = Object.keys(state.words || {}).length;
+  const txt = total === 0 ? '背完第一个词后，这里会自动排出复习计划（不认识明天再来、认识 3/7/15 天后再来）'
+    : due.length ? `今日待复习 ${due.length} 词（按你的掌握程度自动排：不认识当天再来、模糊 2 天、认识 3/7/15 天）`
+      : `今日待复习 0 词 —— 已按间隔排好，下次分别是 ${Object.values(state.words).map((v) => v.nextDue).filter(Boolean).sort()[0] || '—'}`;
+  return `<div class="card" id="reviewBar" style="display:flex;align-items:center;gap:8px;justify-content:space-between;padding:8px 12px">
+    <span class="muted" style="font-size:12px">${txt}${wordSummary ? '<br>' + wordSummary : ''}</span>
+    ${due.length ? '<button class="btn" id="btnReview" style="flex:0 0 auto">复习这 ' + due.length + ' 词</button>' : ''}</div>`;
+}
 function showWord() {
   let el = document.getElementById('wordfull');
   if (!el) { el = document.createElement('div'); el.id = 'wordfull'; el.className = 'wordfull'; document.body.appendChild(el); }
@@ -550,10 +575,18 @@ function showWord() {
     const w0 = wf.list[wf.idx], k = String(w0.word).toLowerCase();
     const kind = b.dataset.rate;
     // 一个词只有一票：记录"最新一次"的状态（0/1 标记），点 100 次也不会把数量刷上去
+    const prevW = state.words[k] || {};
+    const streak = kind === 'known' ? (prevW.streak || 0) + 1
+      : kind === 'fuzzy' ? Math.max(0, (prevW.streak || 0) - 1) : 0;
+    const step = REVIEW_STEPS[Math.min(Math.max(streak - 1, 0), REVIEW_STEPS.length - 1)];
+    const dayStr = (n) => new Date(Date.now() + n * 864e5).toLocaleDateString('sv-SE');
+    const nextDue = kind === 'unknown' ? dayStr(0)      // 不认识：今天再背一次（明天还会再来）
+      : kind === 'fuzzy' ? dayStr(2)                    // 模糊：2 天后
+        : dayStr(step || REVIEW_STEPS[0]);              // 认识：3/7/15/30 天阶梯
     state.words[k] = { known: kind === 'known' ? 1 : 0,
                        fuzzy: kind === 'fuzzy' ? 1 : 0,
                        unknown: kind === 'unknown' ? 1 : 0,
-                       ts: Date.now() };
+                       ts: Date.now(), streak, nextDue, hits: (prevW.hits || 0) + 1 };
     todayAct().words[k] = kind;                     // 记录今天背过这个词（自动完成用）
     saveState();
     wf.rated[k] = kind;                             // 本次会话按"去重后的词"统计
@@ -566,7 +599,10 @@ function showWord() {
 function closeWord() {
   const el = document.getElementById('wordfull');
   if (el) el.classList.remove('show');
-  if (wf.ok + wf.mid + wf.no > 0) alert(`本组完成：认识 ${wf.ok} ｜ 模糊 ${wf.mid} ｜ 不认识 ${wf.no}`);
+  if (wf.ok + wf.mid + wf.no > 0) {
+    wordSummary = `本组完成：认识 ${wf.ok} ｜ 模糊 ${wf.mid} ｜ 不认识 ${wf.no}`;   // 不弹窗打断，显示在今日页
+  }
+  if (typeof render === 'function') render();     // 背完回来要刷新（否则复习条/仪表板是旧数字）
 }
 
 /* ---------------- 练习：真题 / 错题本 / 写作翻译 ---------------- */
