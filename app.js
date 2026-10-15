@@ -2,7 +2,7 @@
 const STATE_KEY = 'tdxl_state_v1';
 const MODE_KEY = 'tdxl_word_mode';
 let CONTENT = null, state = null;
-let tab = 'today', subPractice = 'exam', subMaterials = 'grammar';
+let tab = 'today', subPractice = 'exam', subMaterials = 'tips';
 let planOpen = false;
 let recordsOpen = false;
 let pYear = null, pSection = '词汇题', pQuestions = [];
@@ -138,7 +138,7 @@ function taskProgressAt(date, t) {
     const n = dayAns.length;
     return { done: Math.min(n, 75), total: 75, status: n === 0 ? 'todo' : n >= 75 ? 'ok' : 'doing' };
   }
-  if (ty === '语法/考点') {
+  if (ty === '语法/考点' || ty === '考点速记') {
     const done = Object.keys(act.read).length;
     return { done: Math.min(done, 1), total: 1, status: done ? 'ok' : 'todo' };
   }
@@ -364,7 +364,7 @@ function dashboardCard(day, rows, done) {
 function taskAction(t) {
   const ty = t['类型'] || '';
   if (ty === '新词' || ty === '复习词') return { label: '背词', go: () => openWords(t['词表'] || []) };
-  if (ty === '语法/考点') return { label: '去读', go: () => goMaterialNext() };
+  if (ty === '语法/考点' || ty === '考点速记') return { label: '去读', go: () => goTipsNext() };
   if (ty === '翻译/写作' || ty === '写作') return { label: '去写作', go: () => goWriting(t['年份']) };
   if (ty === '错题重做') return { label: '去错题', go: () => { subPractice = 'wrong'; switchTab('practice'); } };
   if (ty === '整卷模考') return { label: '开考', go: () => goPractice(t['年份'], t['题型'] === '整卷' ? '词汇题' : t['题型']) };
@@ -393,15 +393,16 @@ function goWriting(year) {
   }, 60);
 }
 /** 直达资料：优先打开第一节未读的语法，其次考点 */
-function goMaterialNext() {
+/** 直达资料：只走考点速记（语法已从学习内容排除） */
+function goTipsNext() {
   const act = todayAct();
-  const grammar = (CONTENT.materials || {}).grammar || [];
-  const next = grammar.find((g) => !act.read['grammar:' + g.index]);
-  subMaterials = next ? 'grammar' : 'tips';
+  const tips = (CONTENT.materials || {}).tips || [];
+  const next = tips.find((g) => !act.read['tip:' + g.index]) || tips[0];
+  subMaterials = 'tips';
   switchTab('materials');
   if (next) setTimeout(() => {
-    const el = document.getElementById('g-' + next.index);
-    if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth', block: 'start' }); act.read['grammar:' + next.index] = Date.now(); saveState(); }
+    const el = document.getElementById('t-' + next.index);
+    if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth', block: 'start' }); act.read['t-' + next.index] = Date.now(); saveState(); }
   }, 60);
 }
 function setSectionFor(ty) {
@@ -494,7 +495,7 @@ function firstRunCard() {
 }
 
 /* ---------------- 背词（全屏 · 三档 · 双模式） ---------------- */
-const wf = { list: [], idx: 0, mode: 'en2cn', revealed: false, ok: 0, mid: 0, no: 0 };
+  const wf = { list: [], idx: 0, mode: 'en2cn', revealed: false, ok: 0, mid: 0, no: 0, rated: {} };
 function vocabMap() {
   const m = {};
   const src = (CONTENT.vocab.learn && CONTENT.vocab.learn.length) ? CONTENT.vocab.learn : (CONTENT.vocab.core || []);
@@ -547,12 +548,18 @@ function showWord() {
   $('#wfNext').onclick = () => { wf.idx++; wf.revealed = false; showWord(); };
   el.querySelectorAll('button[data-rate]').forEach((b) => b.onclick = () => {
     const w0 = wf.list[wf.idx], k = String(w0.word).toLowerCase();
-    state.words[k] = state.words[k] || { known: 0, fuzzy: 0, unknown: 0 };
     const kind = b.dataset.rate;
-    state.words[k][kind === 'known' ? 'known' : kind === 'fuzzy' ? 'fuzzy' : 'unknown']++;
+    // 一个词只有一票：记录"最新一次"的状态（0/1 标记），点 100 次也不会把数量刷上去
+    state.words[k] = { known: kind === 'known' ? 1 : 0,
+                       fuzzy: kind === 'fuzzy' ? 1 : 0,
+                       unknown: kind === 'unknown' ? 1 : 0,
+                       ts: Date.now() };
     todayAct().words[k] = kind;                     // 记录今天背过这个词（自动完成用）
     saveState();
-    if (kind === 'known') wf.ok++; else if (kind === 'fuzzy') wf.mid++; else wf.no++;
+    wf.rated[k] = kind;                             // 本次会话按"去重后的词"统计
+    wf.ok = Object.values(wf.rated).filter((v) => v === 'known').length;
+    wf.mid = Object.values(wf.rated).filter((v) => v === 'fuzzy').length;
+    wf.no = Object.values(wf.rated).filter((v) => v === 'unknown').length;
     wf.idx++; wf.revealed = false; showWord();
   });
 }
@@ -796,7 +803,10 @@ function finishExam() {
     // 答题记录入库（键＝「年份:题号」，做错的自动进错题本）
     const qid = qidOf(q, exam.year);
     if (qid.split(':')[0]) {
+      const prev = state.answers[qid];
       state.answers[qid] = Object.assign({}, state.answers[qid], { k: pick || '-', right: !!right, ts: Date.now(), src: 'exam' });
+      if (!right) logWrong({ qid, k: pick || '-', src: 'exam', paper: exam.name, q });
+      else if (prev && prev.right === false) logWrong({ qid, k: pick || '-', right: true, corrected: true, src: 'exam', paper: exam.name, q });
     }
   });
   const minutes = Math.round((Date.now() - exam.startTs) / 60000);
@@ -868,13 +878,58 @@ function renderQuestions() {
     if (ansEl) ansEl.style.display = 'block';
     if (expEl) expEl.style.display = 'block';
     const qid = qidOf(q, pYear);
-    if (qid.split(':')[0]) state.answers[qid] = { k: b.dataset.k, right, ts: Date.now() };
+    if (qid.split(':')[0]) {
+      const prev = state.answers[qid];
+      state.answers[qid] = { k: b.dataset.k, right, ts: Date.now() };
+      if (!right) logWrong({ qid, k: b.dataset.k, src: 'practice', q });
+      else if (prev && prev.right === false) logWrong({ qid, k: b.dataset.k, right: true, corrected: true, src: 'practice', q });
+    }
     saveState();
   });
 }
 function findQuestion(qid) {
   const [year, no] = String(qid).split(':');
   return (CONTENT.exams[year] || []).find((q) => String(q.no) === String(no)) || null;
+}
+/* ---------------- 错题记录（留痕，供分析用） ---------------- */
+function logWrong(entry) {
+  state.wrongLog = state.wrongLog || [];
+  const q = entry.q || findQuestion(entry.qid);
+  state.wrongLog.push({ at: Date.now(), qid: entry.qid, k: entry.k || '',
+                        right: !!entry.right, corrected: !!entry.corrected,
+                        src: entry.src || 'practice', paper: entry.paper || '',
+                        sec: q ? sectionOfQ(q) : '其他' });
+  if (state.wrongLog.length > 3000) state.wrongLog = state.wrongLog.slice(-3000);   // 防无限增长
+  saveState();
+}
+function wrongStats() {
+  const log = state.wrongLog || [];
+  const wrongOnly = log.filter((x) => !x.right);
+  const since = Date.now() - 7 * 864e5, prev = Date.now() - 14 * 864e5;
+  const last7 = wrongOnly.filter((x) => x.at >= since).length;
+  const prev7 = wrongOnly.filter((x) => x.at >= prev && x.at < since).length;
+  const bySec = {};
+  wrongOnly.forEach((x) => { bySec[x.sec || '其他'] = (bySec[x.sec || '其他'] || 0) + 1; });
+  const sections = Object.entries(bySec).map(([name, n]) => ({ name, n })).sort((a, b) => b.n - a.n);
+  return { total: wrongOnly.length, distinct: new Set(wrongOnly.map((x) => x.qid)).size,
+           corrected: log.filter((x) => x.corrected).length, last7, prev7,
+           trend: last7 - prev7, sections, pending: wrongList().length };
+}
+function wrongLogCsv() {
+  const rows = [['时间', '题号', '题型', '来源', '卷名', '选择', '结果']];
+  (state.wrongLog || []).slice().reverse().forEach((x) => {
+    rows.push([new Date(x.at).toLocaleString('sv-SE').slice(0, 19), x.qid, x.sec, x.src,
+               x.paper || '', x.k || '', x.right ? (x.corrected ? '已订正' : '答对') : '答错']);
+  });
+  return rows.map((r) => r.map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\n');
+}
+function exportWrongCsv() {
+  if (!(state.wrongLog || []).length) return alert('还没有错题记录');
+  const blob = new Blob(['\ufeff' + wrongLogCsv()], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '错题记录-' + todayStr() + '.csv';
+  a.click();
 }
 function wrongList() {
   return Object.entries(state.answers || {})
@@ -884,12 +939,27 @@ function wrongList() {
 function renderWrong() {
   const items = wrongList();
   const card = document.createElement('div');
+  const st = wrongStats();
+  const statsHtml = `<div class="card"><h3>错题记录（累计 ${st.total} 次 · 涉及 ${st.distinct} 道题）</h3>
+    <div class="dash">
+      <div><b>${st.pending}</b><span>待重做</span></div>
+      <div><b>${st.last7}</b><span>近 7 天答错（较上周 ${st.trend >= 0 ? '↑' : '↓'}${Math.abs(st.trend)}）</span></div>
+      <div><b>${st.corrected}</b><span>已订正</span></div>
+    </div>
+    ${st.sections.length ? `<div class="muted" style="margin-top:8px">最常错：${st.sections.slice(0, 3).map((s) => s.name + ' ' + s.n + ' 次').join(' ｜ ')}</div>` : ''}
+    <div class="row" style="margin-top:10px"><button class="btn ghost" id="btnWrongCsv">导出错题记录 CSV</button></div>
+    <div class="muted" style="font-size:12px;margin-top:6px">每答错一次都留痕（题号/题型/来源/时间），这份记录会随学习数据上传云端，用来分析你最常错的题型。</div></div>`;
   if (!items.length) {
-    card.innerHTML = `<div class="card"><h3>错题本</h3><div class="muted">还没有错题。做错的题会自动进这里（对应计划里「错题重做」）。</div></div>`;
-    view().appendChild(card); return;
+    card.innerHTML = statsHtml + `<div class="card"><h3>错题本</h3><div class="muted">当前没有待重做的错题。做错的题会自动进这里（对应计划里「错题重做」）。</div></div>`;
+    view().appendChild(card);
+    const cb0 = document.getElementById('btnWrongCsv');
+    if (cb0) cb0.onclick = exportWrongCsv;
+    return;
   }
-  card.innerHTML = `<div class="card"><h3>错题本（${items.length} 题）</h3><div class="muted">重做答对一次即自动移出。</div></div>`;
+  card.innerHTML = statsHtml + `<div class="card"><h3>待重做（${items.length} 题）</h3><div class="muted">重做答对一次即自动移出待重做列表（记录仍留在上面的统计里）。</div></div>`;
   view().appendChild(card);
+  const cb = document.getElementById('btnWrongCsv');
+  if (cb) cb.onclick = exportWrongCsv;
   items.forEach(({ qid, rec, q }) => {
     const opts = Object.keys(q.options || {}).map((k) => `<button class="opt" data-wq="${qid}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('');
     const d = document.createElement('div');
@@ -902,7 +972,11 @@ function renderWrong() {
     const qid = b.dataset.wq, q = findQuestion(qid);
     const right = CN(q.answer).trim().toUpperCase().startsWith(b.dataset.k);
     b.classList.add(right ? 'right' : 'wrong');
-    if (right) { state.answers[qid] = Object.assign({}, state.answers[qid], { right: true, retried: Date.now() }); saveState(); setTimeout(renderPractice, 700); }
+    if (right) {
+      state.answers[qid] = Object.assign({}, state.answers[qid], { right: true, retried: Date.now() });
+      logWrong({ qid, k: b.dataset.k, right: true, corrected: true, src: 'wrong', q });
+      saveState(); setTimeout(renderPractice, 700);
+    }
   });
   view().querySelectorAll('button[data-master]').forEach((b) => b.onclick = () => {
     state.answers[b.dataset.master] = Object.assign({}, state.answers[b.dataset.master], { mastered: true });
@@ -932,11 +1006,11 @@ function renderWriting() {
   });
 }
 
-/* ---------------- 资料：语法 / 考点 ---------------- */
+/* ---------------- 资料：只保留考点速记（语法已从学习内容排除，数据仍在内容包里） ---------------- */
 function renderMaterials() {
   const m = CONTENT.materials || {}, grammar = m.grammar || [], tips = m.tips || [];
+  if (subMaterials === 'grammar') subMaterials = 'tips';          // 旧状态兜底
   const seg = `<div class="seg">
-    <button data-sub="grammar" class="${subMaterials === 'grammar' ? 'active' : ''}">语法（${grammar.length}）</button>
     <button data-sub="tips" class="${subMaterials === 'tips' ? 'active' : ''}">考点速记（${tips.length}）</button></div>`;
   view().innerHTML = seg;
   view().querySelectorAll('.seg button').forEach((b) => b.onclick = () => { subMaterials = b.dataset.sub; renderMaterials(); });
@@ -986,9 +1060,11 @@ function weeklyReport() {
   });
   const sections = Object.entries(bySec).map(([name, v]) => ({ name, total: v.total, ratio: Math.round(v.right / v.total * 100) })).sort((a, b) => b.total - a.total);
   const avgAccuracy = week.length ? Math.round(week.filter(([, r]) => r.right).length / week.length * 100) : null;
-  const known = Object.values(state.words || {}).reduce((a, v) => a + (v.known || 0), 0);
-  const fuzzy = Object.values(state.words || {}).reduce((a, v) => a + (v.fuzzy || 0), 0);
-  const unknown = Object.values(state.words || {}).reduce((a, v) => a + (v.unknown || 0), 0);
+  // 按"具体是哪些词"统计（一个词只算一次），不是把点击次数加起来
+  const wArr = Object.values(state.words || {});
+  const known = wArr.filter((v) => (v.known || 0) > 0).length;
+  const fuzzy = wArr.filter((v) => (v.fuzzy || 0) > 0).length;
+  const unknown = wArr.filter((v) => (v.unknown || 0) > 0).length;
   const tips = [];
   if (avgAccuracy !== null && avgAccuracy < 60) tips.push('正确率偏低：下周新词减半、复习加倍');
   else if (avgAccuracy !== null && avgAccuracy > 85) tips.push('正确率很好：下周可加量 25%');
@@ -1023,9 +1099,10 @@ function recordsCard() {
   const sum = rows.reduce((a, r) => ({ minutes: a.minutes + r.minutes, words: a.words + r.words,
                                        answers: a.answers + r.answers, right: a.right + r.right }),
                           { minutes: 0, words: 0, answers: 0, right: 0 });
-  const known = Object.values(state.words || {}).reduce((a, v) => a + (v.known || 0), 0);
-  const fuzzy = Object.values(state.words || {}).reduce((a, v) => a + (v.fuzzy || 0), 0);
-  const unknown = Object.values(state.words || {}).reduce((a, v) => a + (v.unknown || 0), 0);
+  const rw = Object.values(state.words || {});
+  const known = rw.filter((v) => (v.known || 0) > 0).length;
+  const fuzzy = rw.filter((v) => (v.fuzzy || 0) > 0).length;
+  const unknown = rw.filter((v) => (v.unknown || 0) > 0).length;
   const learned = Object.keys(state.words || {}).length;
   return `<div class="card"><h3>学习记录</h3>
     <div class="muted">近 14 天：学习 <b>${Math.floor(sum.minutes / 60)} 小时 ${sum.minutes % 60} 分</b> ｜ 背词 ${sum.words} 词次
