@@ -532,13 +532,14 @@ function renderToday() {
   const done = counted.filter((p) => p.status === 'ok').length;
   const pct = counted.length ? Math.round(done / counted.length * 100) : 0;
   const isToday = day['日期'] === todayStr();
-  let html = updateBar() + reviewBar() + dashboardCard(day, rows, done) + analysisCard() + `<div class="card"><h3>${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
+  // 2026-10-16 调序：今天的任务必须在第一屏（原来任务在第 1900px 之后，打开 App 看不到今天要干什么）
+  let html = updateBar() + reviewBar() + `<div class="card"><h3>今日任务 · ${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
     <div class="bar"><i style="width:${pct}%"></i></div>
     <div class="muted">已完成 <b>${done}</b> / 未完成 <b>${counted.length - done}</b>（${pct}%）${isToday ? '' : '（当前显示 ' + day['日期'] + ' 的计划）'}<br>
       <span style="font-size:12px">完成状态由你的实际学习记录自动判定（背完词/做完题/读过资料即自动打勾）</span></div>
     <div class="row" style="margin-top:8px"><button class="btn ghost" id="btnPlanView">${planOpen ? '收起完整计划' : '查看完整计划'}</button>
     <span class="muted">${CONTENT.plan['起始']} 起 ${(CONTENT.plan['日计划'] || []).length} 天</span></div>
-    ${planOpen ? planList() : ''}</div>` + recordsCard() + firstRunCard();
+    ${planOpen ? planList() : ''}</div>`;
   (day['时段'] || []).forEach((s, si) => {
     html += `<div class="card slot"><h3>${s['名称']} ${s['开始']} · ${s['分钟']} 分钟</h3>`;
     (s['任务清单'] || []).forEach((t, ti) => {
@@ -557,6 +558,7 @@ function renderToday() {
     });
     html += '</div>';
   });
+  html += dashboardCard(day, rows, done) + analysisCard() + recordsCard() + firstRunCard();
   view().innerHTML = html;
   $('#btnPlanView').onclick = () => { planOpen = !planOpen; renderToday(); };
   const updBtn = document.getElementById('btnUpdate');
@@ -1037,12 +1039,18 @@ function renderQuestions() {
       const auto = (((CONTENT.materials || {}).longSentencesAuto || {})[yr] || {})[pSection] || [];
       const tr = ((((CONTENT.materials || {}).passageTranslation || {})[yr]) || {})[fp] || '';
       const uid = 'ps' + Math.random().toString(36).slice(2, 8);
-      head = `<details class="card passage stickyPassage" id="${uid}"><summary>${pSection} ｜ 原文 ${q.passage.length} 字 ／ 长难句 ${auto.length + ls.length} 句（点开后可一直停在顶部）</summary>
+      // 选项块独立成卡（2026-10-16：原来塞在原文卡里面，用户反馈"选项混进了原文"）
+      const optLines = q.passageOptions
+        ? CN(q.passageOptions).replace(/^([A-Za-z]+\s+(One|Two|Three|Four))\s*/, '<b>$1</b><br>')
+          .replace(/([A-D])[.、]\s*/g, '<br><b>$1.</b> ').replace(/^(<br>)+/, '')
+        : '';
+      const optBlock = optLines ? `<div class="card"><b>选项</b><span class="muted" style="font-size:12px">（先扫一眼这三句，再去下面的原文里对号）</span>
+        <div class="hint" style="margin-top:4px;line-height:1.9">${optLines}</div></div>` : '';
+      head = optBlock + `<details class="card passage stickyPassage" id="${uid}"><summary>${pSection} ｜ 原文 ${q.passage.length} 字 ／ 长难句 ${auto.length + ls.length} 句（点开后可一直停在顶部）</summary>
         <div class="row" style="margin-top:8px"><button class="btn ghost" data-pv="raw" data-uid="${uid}">原文</button>
           <button class="btn ghost" data-pv="parse" data-uid="${uid}">长难句解析</button>
           ${tr ? `<button class="btn ghost" data-pv="trans" data-uid="${uid}">全文译文</button>` : ''}</div>
         <div data-pane="raw">
-          ${q.passageOptions ? `<div class="hint" style="margin-top:6px"><b>选项</b>：${CN(q.passageOptions)}</div>` : ''}
           <div class="ptext">${q.passage}</div></div>
         <div data-pane="trans" style="display:none">
           <div class="ptext pre" style="margin-top:6px">${CN(tr)}</div>
@@ -1102,83 +1110,139 @@ function renderQuestions() {
 }
 /* ---------------- 短文完成：三词 → 三短语 → 填进文章（专用界面） ---------------- */
 function renderDuanwen(qs, box) {
-  // 一篇短文完成通常有 2~3 段原文，每段自带一批空 → 按题干原文分组渲染
-  const groups = [];
-  qs.forEach((q) => {
-    const p = CN(q.passage || '');
-    let g = groups.find((x) => x.raw === p);
-    if (!g) { g = { raw: p, qs: [] }; groups.push(g); }
-    g.qs.push(q);
-  });
-  box.innerHTML = `<div class="card q"><h3>短文完成（三步走 · 共 ${groups.length} 段原文）</h3>
-    <div class="hint">①先把<b>三个词</b>填进三个短语；②再把<b>短语</b>填进文章的编号空。选完点「对答案」，错题自动进错题本。</div>
-    ${groups.map((g, gi) => `<div style="margin-top:14px">
-      <div class="muted"><b>第 ${gi + 1} 段${groups.length > 1 ? '（原文 ' + (gi + 1) + '/' + groups.length + '）' : ''}</b></div>
-      <div class="dwSec" data-g="${gi}"></div>
+  /* 短文完成 = 试卷两步结构（先把词填进短语，再把短语填进正文）。
+     2026-10-16 重写：数据层已把「选项 / 短语项 / 正文」拆开（系统\工具\21-整理短文完成.py），
+     界面不再把选项混在原文里，每个空都标出试卷题号。 */
+  const dwAll = ((CONTENT.materials || {}).duanwen || {})[pYear];
+  const byNo = {};
+  pQuestions.forEach((q) => { byNo[String(q.no)] = q; });
+  if (!dwAll || !dwAll.length) {                       // 兜底：老结构（没有整理数据时）
+    box.innerHTML = `<div class="card q"><h3>短文完成</h3>
+      <div class="hint">这段缺少整理后的结构数据（请让后台重跑「21-整理短文完成.py」后再看）。</div></div>`;
+    return;
+  }
+  const optText = (it, letter) => CN(String((it['选项'] || {})[letter] || ''));
+  const phraseHtml = (t, k, pick) => {                 // 某短语补全后的样子
+    const it = (t['短语项'] || []).find((x) => x.k === k);
+    if (!it) return k;
+    const w = pick ? optText(it, pick) : '…';
+    return (CN(it['前置']) + ' ' + w + ' ' + CN(it['尾巴'])).replace(/\s+/g, ' ').trim();
+  };
+  const selStyle = 'min-height:36px;padding:4px 8px;font-size:13px;margin:0 3px;max-width:52vw';
+
+  const drawText = (t, gi) => {
+    const pick = {};                                   // 第一步当前选择：{A:'B', ...}
+    const host = box.querySelector(`[data-dwt="${gi}"]`);
+    if (!host) return;
+    const firstQ = (t['短语项'] || []).map((x) => x['题号']).filter(Boolean);
+    const secondQ = (t['正文题'] || []).map((x) => x['题号']).filter(Boolean);
+    const boxWords = (t['框内选项'] || []).length
+      ? (t['框内选项'] || []).map((b) => `<b>${b.k}.</b> ${CN(b['词'])}`).join('　')
+      : ((t['短语项'] || [])[0] && (t['短语项'] || [])[0]['选项']
+        ? Object.entries((t['短语项'] || [])[0]['选项']).map(([k, v]) => `<b>${k}.</b> ${CN(v)}`).join('　')
+        : '<span class="muted">源数据缺方框选项（看答案里有解析）</span>');
+    const step1 = (t['短语项'] || []).map((it) => {
+      const opts = Object.entries(it['选项'] || {});
+      const sel = opts.length
+        ? `<select data-dw="${gi}" data-kind="phrase" data-no="${it['题号']}" data-k="${it.k}" style="${selStyle}">
+             <option value="">选…</option>
+             ${opts.map(([k, v]) => `<option value="${k}">${k}. ${CN(v)}</option>`).join('')}</select>`
+        : `<select disabled style="${selStyle}"><option value="">（缺选项）</option></select>`;
+      return `<div style="margin-top:8px">${it.k}. ${CN(it['前置'])} ${sel} ${CN(it['尾巴'])}
+        <div class="muted" style="font-size:12px">第 ${it['题号']} 题${it['空'] ? '（原文空 (' + it['空'] + ')）' : ''}</div></div>`;
+    }).join('');
+    const letters = (t['短语项'] || []).map((x) => x.k);
+    const bodyHtml = CN(t['正文']).replace(/\((\d{1,3})\)\s*_+/g, (m, no) => {
+      const q = (t['正文题'] || []).find((x) => String(x['空']) === String(no));
+      const label = q ? `第 ${q['题号']} 题` : '';
+      return `<span style="white-space:nowrap"><b>(${no})</b>
+        <select data-dw="${gi}" data-kind="body" data-blank="${no}" style="${selStyle}">
+          <option value="">选…</option>
+          ${letters.map((k) => `<option value="${k}">${k}. ${phraseHtml(t, k, pick[k])}</option>`).join('')}
+        </select><span class="muted" style="font-size:11px">${label}</span></span>`;
+    });
+    host.innerHTML = `<div class="muted"><b>第 ${gi + 1} 段 / ${dwAll.length} · ${CN(t['名'])}</b>（第一步 ${firstQ.length} 题：${firstQ.join('、')}｜第二步 ${secondQ.length} 题：${secondQ.join('、')}）</div>
+      <div class="muted" style="margin-top:8px"><b>第一步 · 用方框里的词补全短语</b></div>
+      <div class="hint" style="margin-top:4px">方框选项：${boxWords}</div>
+      ${step1}
+      <div class="muted" style="margin-top:12px"><b>第二步 · 把补全后的短语填进正文</b></div>
+      <div class="ptext" style="margin-top:4px;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:52vh;overflow:auto">${bodyHtml}</div>
       <div class="row" style="margin-top:8px"><button class="btn" data-dwcheck="${gi}">对答案</button>
         <button class="btn ghost" data-dwreveal="${gi}">看答案</button>
         <span class="muted" data-dwmsg="${gi}"></span></div>
-      <div class="explain" data-dwexp="${gi}" style="display:none;margin-top:8px"></div></div>`).join('')}</div>`;
-  groups.forEach((g, gi) => {
-    const byBlank = {};
-    g.qs.forEach((q) => { byBlank[Math.max(1, q.no - 2)] = q; });      // 题号 58 ↔ 空 (56)
-  const sel = (no) => {
-    const q = byBlank[no];
-    if (!q) return `<b>(${no}) ____</b>`;
-    return `<select data-blank="${no}" style="min-height:34px;padding:4px 8px;font-size:13px;margin:0 2px">
-      <option value="">(${no}) 选…</option>
-      ${Object.entries(q.options || {}).map(([k, v]) => `<option value="${k}">${k}. ${CN(v).slice(0, 26)}</option>`).join('')}
-    </select>`;
-  };
-    const blanks = [...new Set((g.raw.match(/\((\d+)\)/g) || []).map((s) => Number(s.replace(/\D/g, ''))))].sort((a, b) => a - b);
-    const cut = blanks.find((n) => n >= 59);
-    let step1 = g.raw, step2 = '';
-    if (cut) {
-      const idx = g.raw.search(new RegExp("\\(" + cut + "\\)"));
-      // 从"第一个文章空"往前找该段之前的换行/短语结束位置
-      step1 = g.raw.slice(0, idx);
-      step2 = g.raw.slice(idx);
-    }
-    const html = `<div class="muted" style="margin-top:6px"><b>第 1 步 · 短语补词</b></div>
-      <div class="ptext" style="margin-top:4px;border:1px solid var(--line);border-radius:10px;padding:10px">${step1.replace(/\((\d+)\)\s*_*/g, (m, n) => sel(Number(n)))}</div>
-      ${step2 ? `<div class="muted" style="margin-top:10px"><b>第 2 步 · 把短语填进原文</b></div>
-        <div class="ptext" style="margin-top:4px;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:50vh;overflow:auto">${step2.replace(/\((\d+)\)\s*_*/g, (m, n) => sel(Number(n)))}</div>` : ''}`;
-    box.querySelector(`.dwSec[data-g="${gi}"]`).innerHTML = html;
-  const mark = (reveal) => {
-    let right = 0, total = 0;
-    box.querySelectorAll(`.dwSec[data-g="${gi}"] select[data-blank]`).forEach((s) => {
-      const q = byBlank[Number(s.dataset.blank)];
-      if (!q) return;
-      total++;
-      const ans = String(q.answer || '').trim().toUpperCase()[0];
-      if (reveal && !s.value) s.value = ans;
-      const ok = s.value === ans;
-      s.style.borderColor = ok ? 'var(--ok)' : 'var(--bad)';
-      s.style.background = ok ? '#f1fbf5' : '#fdf3f2';
-      if (s.value) {
-        const qid = qidOf(q, pYear);
-        state.answers[qid] = { k: s.value, right: ok, ts: Date.now() };
-        if (!ok) logWrong({ qid, k: s.value, src: 'practice', q });
-        else right++;
-      }
+      <div class="explain" data-dwexp="${gi}" style="display:none;margin-top:8px"></div>`;
+    // 第一步选择变化 → 第二步选项里的短语文案跟着变（重新渲染这一段，保留已选）
+    const keep = () => {
+      const vals = {};
+      host.querySelectorAll('select[data-dw]').forEach((s) => {
+        vals[(s.dataset.kind || 'body') + ':' + (s.dataset.k || s.dataset.blank)] = s.value;
+      });
+      drawText(t, gi);
+      box.querySelectorAll(`[data-dwt="${gi}"] select[data-dw]`).forEach((s) => {
+        const key = (s.dataset.kind || 'body') + ':' + (s.dataset.k || s.dataset.blank);
+        if (vals[key]) s.value = vals[key];
+      });
+      bind();
+    };
+    host.querySelectorAll('select[data-kind="phrase"]').forEach((s) => {
+      s.onchange = () => { pick[s.dataset.k] = s.value; keep(); };
     });
-    saveState();
-    box.querySelector(`[data-dwmsg="${gi}"]`).textContent = `已判 ${total} 空 ｜ 对 ${right} 空（错的已进错题本）`;
-    const exp = box.querySelector(`[data-dwexp="${gi}"]`);
-    if (exp) {
-      exp.style.display = 'block';
-      exp.innerHTML = Object.keys(byBlank).sort((a, b) => a - b).map((no) => {
-        const q = byBlank[no];
-        const ans = String(q.answer || '').trim();
-        const ansText = (q.options || {})[ans[0]] || '';
-        return `<div style="margin-top:6px"><b>(${no}) 答案 ${ans}</b>. ${CN(ansText)}
-          ${q.explanation ? '<div class="muted" style="margin-top:2px">' + CN(q.explanation) + '</div>' : ''}</div>`;
-      }).join('');
-    }
+    const mark = (reveal) => {
+      let right = 0, total = 0;
+      host.querySelectorAll('select[data-dw]').forEach((s) => {
+        const q = s.dataset.kind === 'phrase'
+          ? byNo[String(s.dataset.no)]
+          : ((t['正文题'] || []).find((x) => String(x['空']) === String(s.dataset.blank)) || {});
+        const ans = String(q['答案'] || '').trim().toUpperCase()[0];
+        if (!ans) return;
+        total++;
+        if (reveal && !s.value) s.value = ans;
+        const ok = s.value === ans;
+        s.style.borderColor = ok ? 'var(--ok)' : 'var(--bad)';
+        s.style.background = ok ? '#f1fbf5' : '#fdf3f2';
+        if (s.value) {
+          const qid = pYear + ':' + q['题号'];
+          const full = byNo[String(q['题号'])] || {};
+          state.answers[qid] = { k: s.value, right: ok, ts: Date.now() };
+          if (!ok) logWrong({ qid, k: s.value, src: 'practice', q: full });
+          else if (ok) right++;
+        }
+      });
+      saveState();
+      const msg = host.querySelector(`[data-dwmsg="${gi}"]`);
+      if (msg) msg.textContent = `已判 ${total} 空 ｜ 对 ${right} 空（错的已进错题本）`;
+      const exp = host.querySelector(`[data-dwexp="${gi}"]`);
+      if (exp) {
+        exp.style.display = 'block';
+        const rows = [];
+        (t['短语项'] || []).forEach((it) => {
+          const q = byNo[String(it['题号'])] || {};
+          rows.push(`<div style="margin-top:6px"><b>第 ${it['题号']} 题（${it.k} 短语，原文空 (${it['空']})）答案 ${it['答案']}</b>
+            → ${CN(it['前置'])} <u>${optText(it, it['答案'])}</u> ${CN(it['尾巴'])}
+            ${q.explanation ? '<div class="muted" style="margin-top:2px">' + CN(q.explanation) + '</div>' : ''}</div>`);
+        });
+        (t['正文题'] || []).forEach((x) => {
+          const q = byNo[String(x['题号'])] || {};
+          rows.push(`<div style="margin-top:6px"><b>第 ${x['题号']} 题（原文空 (${x['空']})）答案 ${x['答案']}</b>
+            → 短语 ${x['答案']}：${phraseHtml(t, x['答案'], ((t['短语项'] || []).find((y) => y.k === x['答案']) || {})['答案'])} 
+            ${q.explanation ? '<div class="muted" style="margin-top:2px">' + CN(q.explanation) + '</div>' : ''}</div>`);
+        });
+        exp.innerHTML = rows.join('');
+      }
+    };
+    const bind = () => {
+      const c = host.querySelector(`[data-dwcheck="${gi}"]`);
+      const r = host.querySelector(`[data-dwreveal="${gi}"]`);
+      if (c) c.onclick = () => mark(false);
+      if (r) r.onclick = () => mark(true);
+    };
+    bind();
   };
-    box.querySelector(`[data-dwcheck="${gi}"]`).onclick = () => mark(false);
-    box.querySelector(`[data-dwreveal="${gi}"]`).onclick = () => mark(true);
-  });
+
+  box.innerHTML = `<div class="card q"><h3>短文完成 · ${dwAll.length} 段 · 共 ${pQuestions.length} 题</h3>
+    <div class="hint">试卷规则：<b>第一步</b>把方框里的词填进三个短语（补全短语）；<b>第二步</b>把补全后的短语 A/B/C 填进正文的空。每个空都标了试卷题号，选完点「对答案」，错题自动进错题本。</div>
+    ${dwAll.map((t, gi) => `<div style="margin-top:16px;border-top:1px dashed var(--line2);padding-top:10px" data-dwt="${gi}"></div>`).join('')}</div>`;
+  dwAll.forEach((t, gi) => drawText(t, gi));
 }
 function findQuestion(qid) {
   const [year, no] = String(qid).split(':');
