@@ -235,6 +235,9 @@ function analysisText() {
       ' ｜ 正确率：' + (analysis.avgAccuracy === null ? '—' : analysis.avgAccuracy + '%'),
       '分题型：' + (analysis.sections || []).map((s) => `${s.name} ${s.ratio}%（${s.total} 题）`).join('、'),
       '薄弱题型：' + (analysis.weak ? analysis.weak.name + ' ' + analysis.weak.ratio + '%' : '暂无明显薄弱'),
+      '阅读速度：' + (analysis.speed && analysis.speed.medianTotal !== null
+        ? `主指标中位数 ${analysis.speed.medianTotal} 词/分` + (analysis.speed.medianRead !== null ? ` ｜ 辅 ${analysis.speed.medianRead} 词/分` : '') + `（${analysis.speed.samples} 次）`
+        : '本周还没记录（限时阅读里先点「通读完成」再点「限时完成」）'),
       '下周调整：' + (analysis.advice ? [analysis.advice.newWords, analysis.advice.planScale < 1 ? '任务量×0.7' : '任务量不变',
         analysis.advice.focus.join('、') || '无明显专项'].join(' ｜ ') : '—'),
       analysis.summary].join('\n');
@@ -264,6 +267,7 @@ function analysisCard() {
       <div data-jump="weak"><b>${a.weak ? a.weak.name : '—'}</b><span>薄弱题型${a.weak ? ' ' + a.weak.ratio + '%' : ''} ▸练</span></div>
       <div data-jump="known"><b>${a.words ? a.words.known : 0}</b><span>累计认识词 ▸看词表</span></div>
       <div data-jump="unknown"><b>${a.words ? a.words.unknown : 0}</b><span>待攻克的词 ▸去攻克</span></div>
+      <div><b>${a.speed && a.speed.medianTotal !== null ? a.speed.medianTotal : '—'}</b><span>阅读速度 词/分（主指标中位数）</span></div>
     </div>
     <div class="muted" style="margin-top:8px">${CN(a.summary)}</div>
     <div style="margin-top:8px">${['词汇题', '口语交际', '阅读理解', '完形填空', '短文完成'].map((sec) => {
@@ -432,27 +436,40 @@ function goTimedReading(year, papers) {
     bar.id = 'timedBar';
     bar.innerHTML = `<div class="row" style="justify-content:space-between"><b>⏱ 限时阅读（${n} 篇）</b>
       <span class="muted" id="timedClock">00:00</span>
+      <button class="btn ghost" id="btnTimedRead">通读完成</button>
       <button class="btn" id="btnTimedDone">限时完成</button></div>
-      <div class="muted" style="margin-top:6px">读完点「限时完成」，系统按篇章词数 ÷ 用时记录你的阅读速度（wpm）。</div>`;
+      <div class="muted" style="margin-top:6px">计划 §五 双指标：先点<b>「通读完成」</b>记纯通读用时（<b>wpm_read</b>，辅指标），做完题再点<b>「限时完成」</b>记总用时（<b>wpm_total</b>，主指标＝含答题）。</div>`;
     box.parentNode.insertBefore(bar, box);
     const t0 = Date.now();
+    let readMin = 0;                      // 纯通读用时（点「通读完成」那一刻）
     const id = setInterval(() => {
       const el = document.getElementById('timedClock');
       if (el) el.textContent = String(Math.floor((Date.now() - t0) / 60000)).padStart(2, '0') + ':' +
         String(Math.floor((Date.now() - t0) / 1000) % 60).padStart(2, '0');
     }, 1000);
+    document.getElementById('btnTimedRead').onclick = () => {
+      readMin = Math.max(0.2, (Date.now() - t0) / 60000);
+      const b = document.getElementById('btnTimedRead');
+      if (b) { b.textContent = '通读 ' + readMin.toFixed(1) + ' 分 ✓'; b.disabled = true; }
+    };
     document.getElementById('btnTimedDone').onclick = () => {
       clearInterval(id);
       const mins = Math.max(0.5, (Date.now() - t0) / 60000);
       const passages = pQuestions.slice(0, 5);
       const words = passages.reduce((a, q) => a + (CN(q.passage || '').split(/\s+/).filter(Boolean).length), 0) || 380 * n;
       state.speed = state.speed || [];
-      state.speed.push({ date: todayStr(), words: words, minutes: Math.round(mins * 10) / 10,
-                         wpm_read: Math.round(words / mins) });
+      const entry = { date: todayStr(), words: words,
+                      totalMinutes: Math.round(mins * 10) / 10,
+                      wpm_total: Math.round(words / mins),
+                      readMinutes: readMin > 0 ? Math.round(readMin * 10) / 10 : null,
+                      wpm_read: readMin > 0 ? Math.round(words / readMin) : null };
+      state.speed.push(entry);
       state.speed = state.speed.slice(-60);
       todayAct().read['timed:' + todayStr()] = Date.now();
       saveState();
-      alert(`已记录：${words} 词 / ${mins.toFixed(1)} 分钟 ≈ ${Math.round(words / mins)} 词/分`);
+      alert(`已记录：${words} 词 ｜ 总用时 ${mins.toFixed(1)} 分 → 主指标 ${entry.wpm_total} 词/分` +
+        (entry.wpm_read ? `（纯通读 ${entry.readMinutes} 分 → 辅指标 ${entry.wpm_read} 词/分）`
+                        : '（没点「通读完成」，这轮辅指标为空）'));
       bar.remove();
     };
   }, 150);
@@ -1401,6 +1418,32 @@ function exportCsv() {
   a.click();
 }
 
+/** 阅读速度（计划 §五）：主指标 wpm_total + 辅指标 wpm_read，按当周取中位数并与本阶段目标比 */
+function speedSummary() {
+  const all = (state.speed || []).filter((x) => x && x.wpm_total);
+  const since = lastNDates(7)[0];                       // 近 7 天（含今天）
+  const week = all.filter((x) => x.date >= since);
+  const med = (arr) => {
+    const v = arr.filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+    if (!v.length) return null;
+    const m = Math.floor(v.length / 2);
+    return Math.round(v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2);
+  };
+  const cur = med(week.map((x) => x.wpm_total));
+  const curRead = med(week.map((x) => x.wpm_read));
+  // 本阶段速度目标：取今天（或最近一天）所在阶段的「阅读速度」
+  const days = CONTENT.plan['日计划'] || [];
+  const today = days.find((d) => d['日期'] === todayStr()) || days[days.length - 1] || {};
+  const tgt = ((CONTENT.plan['阶段目标'] || {})[today['阶段']] || {})['阅读速度'] || null;
+  if (cur === null && curRead === null) {
+    return '本周还没记录（做「限时阅读」时先点「通读完成」再点「限时完成」）';
+  }
+  const hit = (now) => (tgt && now !== null ? (now >= tgt ? ' ✅达标' : `（目标 ${tgt}，还差 ${tgt - now}）`) : '');
+  const recent = all.slice(-3).map((x) => `${x.date.slice(5)} 主 ${x.wpm_total}${x.wpm_read ? ' / 辅 ' + x.wpm_read : ''}`).join(' ｜ ');
+  return `主指标中位数 ${cur === null ? '—' : cur} 词/分${hit(cur)}` +
+    (curRead !== null ? ` ｜ 辅 ${curRead} 词/分` : '') +
+    (recent ? `<br><span class="muted">最近 3 次：${recent}（共 ${all.length} 次记录）</span>` : '');
+}
 function renderMine() {
   fixSyncUrl();
   const rep = weeklyReport();
@@ -1408,12 +1451,12 @@ function renderMine() {
   if (subPractice === 'review') {          // 周复盘（计划里「周复盘」任务的落点）
     const st = wrongStats();
     const sp = (state.speed || []).slice(-3);
-    const spTxt = sp.length ? sp.map((x) => `${x.date} ${x.wpm_read} 词/分`).join(' ｜ ') : '本周还没记录';
+    const spTxt = speedSummary();
     const items = [
       ['本周完成率', (rep.avgCompletion === null ? '—' : rep.avgCompletion + '%') + (rep.avgCompletion !== null && rep.avgCompletion < 70 ? '（<70%，下周日会自动减量）' : '')],
       ['学习天数', rep.studiedDays + '/7'],
       ['正确率', (rep.avgAccuracy === null ? '—' : rep.avgAccuracy + '%')],
-      ['阅读速度（最近 3 次）', spTxt],
+      ['阅读速度（计划 §五 双指标）', spTxt],
       ['分题型', rep.sections.length ? rep.sections.map((s) => `${s.name} ${s.ratio}%（${s.total} 题）`).join('、') : '本周无答题'],
       ['错题', `累计 ${st.total} 次 ｜ 待重做 ${st.pending} ｜ 近 7 天 ${st.last7} 次`],
       ['词汇', `认识 ${rep.known} ｜ 模糊 ${rep.fuzzy} ｜ 不认识 ${rep.unknown}`],
