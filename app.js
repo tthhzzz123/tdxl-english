@@ -25,14 +25,18 @@ function saveState() {                    // 存本机 + 顺手排一次"自动�
 
 /* ---------------- 云同步：改完自动传（0 操作），云端被别人改过就不覆盖 ---------------- */
 let syncTimer = null, syncBusy = false;
+const DEFAULT_SYNC_KEY = 'rxmshijiezuimei';      // 自动模式直接用它，用户不用手填
+function syncMode() { return (state && state.sync && state.sync.mode) === 'manual' ? 'manual' : 'auto'; }
+function defaultSyncKey() { return (state && state.sync && state.sync.key) || DEFAULT_SYNC_KEY; }
 function syncReady() {
-  return !!(state && state.sync && state.sync.url && state.sync.key && state.sync.auto !== false);
+  return !!(state && state.sync && state.sync.url && state.sync.key && syncMode() === 'auto');
 }
 function syncStatusText() {
   const s = (state && state.sync) || {};
-  if (!s.url || !s.key) return '还没设置同步（填同步码就自动开了）';
+  const mode = syncMode();
+  if (!s.url || !s.key) return mode === 'auto' ? '自动上传已就绪（同步码已自动填好）' : '手动模式：填同步码后点「上传」';
   if (s.conflict) return '云端有更新（别的设备改过）→ 点「从云恢复」拿回来';
-  if (s.pending) return '有改动待上传：联网后自动传（也可以点「上传到云」）';
+  if (s.pending) return mode === 'auto' ? '有改动待上传：联网后自动传（也可以点「立即上传」）' : '有改动还没传：点「上传」推上去';
   return s.lastSync ? '已自动同步 ' + s.lastSync : '已开启自动同步（有改动就自动传）';
 }
 function scheduleAutoSync() {
@@ -42,7 +46,19 @@ function scheduleAutoSync() {
   syncTimer = setTimeout(() => { autoSync(); }, 8000);       // 停手 8 秒后自动补传
 }
 async function autoSync() {
-  if (syncBusy || !syncReady() || (navigator.onLine === false)) return;
+  if (syncMode() === 'manual') return;                     // 手动模式：只有点「上传」才传
+  return pushState(false);
+}
+/** 真正把本机学习记录推到云端（autoSync 与手动「上传」共用） */
+async function pushState(manual) {
+  if (syncBusy || !(state && state.sync && state.sync.url && state.sync.key)) {
+    if (manual) return { ok: false, msg: '先填同步码（地址已自动填好）' };
+    return { ok: false, msg: '' };
+  }
+  if (navigator.onLine === false) {
+    if (manual) return { ok: false, msg: '当前离线，联网后再点「上传」' };
+    return { ok: false, msg: '' };
+  }
   syncBusy = true;
   try {
     const head = await fetch(state.sync.url, { cache: 'no-store',
@@ -52,7 +68,8 @@ async function autoSync() {
       if (j.updatedAt && state.sync.lastSync && j.updatedAt !== state.sync.lastSync) {
         state.sync.conflict = true; syncBusy = false; saveStateRaw();
         if (tab === 'mine') renderMine();
-        return;                                              // 云端更新 → 不覆盖，等用户选
+        if (tab === 'today') renderToday();
+        return { ok: false, msg: '云端有别的设备改过的更新 → 先点「从云端还原」再上传' };
       }
     }
     const r = await fetch(state.sync.url, { method: 'PUT', cache: 'no-store',
@@ -65,10 +82,15 @@ async function autoSync() {
     if (typeof fetchAnalysis === 'function') setTimeout(() => fetchAnalysis(false), 800);   // 传完顺手刷新分析
   } catch (e) {
     /* 离线 / 暂时连不上：留着 pending，下次打开或联网时再传 */
+    syncBusy = false;
+    saveStateRaw();
+    return { ok: false, msg: '上传失败：' + (e.message || e) + '（联网后可再试）' };
   }
   syncBusy = false;
   saveStateRaw();
   if (tab === 'mine') renderMine();
+  if (tab === 'today') renderToday();
+  return { ok: true, msg: '已上传 ' + (state.sync.lastSync || '') };
 }
 window.addEventListener('online', () => { autoSync(); });
 function freshState() { return { days: {}, words: {}, answers: {}, created: new Date().toISOString() }; }
@@ -293,6 +315,83 @@ function updateBar() {
   return `<div class="card" style="display:flex;align-items:center;gap:8px;justify-content:space-between;padding:8px 12px">
     <span class="muted" id="updMsg" style="font-size:12px">${updNote || '内容和数据都是自动同步的（打开就更新）'}</span>
     <button class="btn" id="btnSync" style="flex:0 0 auto">同步</button></div>`;
+}
+/** 上传模块（2026-10-16 从「我的」搬到今日页、紧贴「同步」下面）：自动 / 手动 两态 + 什么时候用哪个 */
+function uploadCard() {
+  const s = (state && state.sync) || {};
+  const mode = syncMode();
+  const url = s.url || defaultSyncUrl();
+  const keyVal = mode === 'auto' ? defaultSyncKey() : (s.manualKey || '');   // 手动模式：留空让你自己填
+  return `<div class="card" id="uploadCard"><h3>上传 · 学习记录云同步</h3>
+    <div class="muted" style="font-size:12px;line-height:1.7">
+      <b>什么时候点「同步」（上面那个）</b>：想立刻拿到电脑端刚排好的计划 / 新内容 —— 它拉内容 + 拉云端分析。<br>
+      <b>什么时候用「上传」</b>：做完题、背完词，要把记录送到云端（供电脑端每周重排、换设备也能看到）。
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn ${mode === 'auto' ? '' : 'ghost'}" id="btnModeAuto" style="flex:0 0 auto">自动（推荐）</button>
+      <button class="btn ${mode === 'manual' ? '' : 'ghost'}" id="btnModeManual" style="flex:0 0 auto">手动</button>
+      <span class="muted" style="font-size:12px;align-self:center">${
+        mode === 'auto' ? '改动停手 8 秒自动传；离线自动补传' : '填好同步码，点「上传」才传'}</span></div>
+    <div class="row" style="margin-top:8px"><input id="syncKey" type="password" placeholder="${mode === 'auto' ? '同步码（已自动填好）' : '填同步码'}" style="width:150px" value="${keyVal}">
+      <button class="btn" id="btnUploadNow" style="flex:0 0 auto">${mode === 'auto' ? '立即上传' : '上传'}</button>
+      <span class="muted" id="syncMsg" style="font-size:12px;align-self:center">${syncStatusText()}</span></div>
+    <div class="muted" style="margin-top:6px;font-size:12px">地址：${url}（${channelNote()}）</div>
+    ${s.conflict ? `<div class="row" style="margin-top:8px"><button class="btn ghost" id="btnDown">从云端还原（云端被别的设备改过）</button></div>` : ''}
+  </div>`;
+}
+function bindUploadCard() {
+  const modeAuto = document.getElementById('btnModeAuto');
+  const modeManual = document.getElementById('btnModeManual');
+  const up = document.getElementById('btnUploadNow');
+  const keyInput = document.getElementById('syncKey');
+  if (modeAuto) modeAuto.onclick = () => {
+    state.sync = Object.assign({}, state.sync, {
+      mode: 'auto', url: (state.sync && state.sync.url) || defaultSyncUrl(),
+      key: (keyInput && keyInput.value.trim()) || defaultSyncKey() });
+    saveState(); renderToday(); autoSync();
+  };
+  if (modeManual) modeManual.onclick = () => {
+    state.sync = Object.assign({}, state.sync, {
+      mode: 'manual', url: (state.sync && state.sync.url) || defaultSyncUrl() });
+    saveState(); renderToday();
+  };
+  if (up) up.onclick = async () => {
+    const typed = (keyInput && keyInput.value.trim()) || '';
+    const s = state.sync = Object.assign({}, state.sync, {
+      url: (state.sync && state.sync.url) || defaultSyncUrl(),
+      key: typed || (syncMode() === 'auto' ? defaultSyncKey() : ''),
+      manualKey: syncMode() === 'manual' ? typed : (state.sync && state.sync.manualKey),
+      mode: syncMode() });
+    if (!s.url || !s.key) { alert('先填同步码'); return; }
+    const msg = document.getElementById('syncMsg');
+    if (msg) msg.textContent = '上传中…';
+    saveState();
+    const r = await pushState(true);
+    const m2 = document.getElementById('syncMsg');
+    if (m2) m2.textContent = r.msg || (r.ok ? '已上传' : '未上传');
+  };
+  const down = document.getElementById('btnDown');
+  if (down) down.onclick = pullFromCloud;
+}
+/** 用云端数据覆盖本机（冲突时用；跟「上传」相反方向） */
+async function pullFromCloud() {
+  const k = (document.getElementById('syncKey') || {}).value;
+  state.sync = Object.assign({}, state.sync, {
+    url: (state.sync && state.sync.url) || defaultSyncUrl(),
+    key: (k && k.trim()) || defaultSyncKey() });
+  saveState();
+  if (!state.sync.url || !state.sync.key) { alert('先填同步码'); return; }
+  if (!confirm(state.sync.conflict ? '云端是别的设备改过的版本，用它覆盖本机？' : '用云端数据覆盖本机数据？')) return;
+  try {
+    const r = await fetch(state.sync.url, { cache: 'no-store', headers: { 'Authorization': 'Bearer ' + state.sync.key } });
+    if (r.status === 404) return alert('云端还没有数据');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json(), sync = state.sync;
+    state = j.state;
+    state.sync = Object.assign({}, sync, { lastSync: j.updatedAt || new Date().toLocaleString(),
+                                           pending: false, conflict: false });
+    saveStateRaw(); alert('已从云恢复'); render();
+  } catch (e) { alert('恢复失败：' + e.message); }
 }
 async function checkContent(manual) {
   if (!CONTENT) return;
@@ -533,7 +632,7 @@ function renderToday() {
   const pct = counted.length ? Math.round(done / counted.length * 100) : 0;
   const isToday = day['日期'] === todayStr();
   // 2026-10-16 调序：今天的任务必须在第一屏（原来任务在第 1900px 之后，打开 App 看不到今天要干什么）
-  let html = updateBar() + reviewBar() + `<div class="card"><h3>今日任务 · ${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
+  let html = updateBar() + uploadCard() + reviewBar() + `<div class="card"><h3>今日任务 · ${day['日期']} 周${day['星期']} · ${day['类型']} · ${day['阶段']}</h3>
     <div class="bar"><i style="width:${pct}%"></i></div>
     <div class="muted">已完成 <b>${done}</b> / 未完成 <b>${counted.length - done}</b>（${pct}%）${isToday ? '' : '（当前显示 ' + day['日期'] + ' 的计划）'}<br>
       <span style="font-size:12px">完成状态由你的实际学习记录自动判定（背完词/做完题/读过资料即自动打勾）</span></div>
@@ -560,6 +659,7 @@ function renderToday() {
   });
   html += dashboardCard(day, rows, done) + analysisCard() + recordsCard() + firstRunCard();
   view().innerHTML = html;
+  bindUploadCard();
   $('#btnPlanView').onclick = () => { planOpen = !planOpen; renderToday(); };
   const updBtn = document.getElementById('btnUpdate');
   const syncBtn = document.getElementById('btnSync');
@@ -743,7 +843,7 @@ function renderPractice() {
   bindSeg();
   if (subPractice === 'exam') renderExam();
   else if (subPractice === 'wrong') renderWrong();
-  else if (subPractice === 'testing') renderExamHub();
+  else if (subPractice === 'testing') { if (exam && !exam.finished) renderExamPaper(); else renderExamHub(); }
   else renderWriting();
 }
 
@@ -909,10 +1009,91 @@ function renderExamHub() {
   };
   $('#btnMakeExam').onclick = () => startExam('make');
 }
+/* ======= 考试系统（2026-10-16 优化）======= */
+function examNoIndex() {                       // 题号 → 试卷内序号（短文完成两步界面要用）
+  const m = {};
+  (exam.qs || []).forEach((q, i) => { m[String(q.no)] = i; });
+  return m;
+}
+function examTrans(q) {
+  const raw = CN(q.passage || '');
+  const yr = String(q.yr || exam.year || '');
+  const fp = raw.replace(/\s+/g, ' ').trim().slice(0, 60);
+  return ((((CONTENT.materials || {}).passageTranslation || {})[yr]) || {})[fp] || '';
+}
+/** 考试卷里的原文块（默认展开、框内可上下滑动、可切全文译文） */
+function examPassageHtml(q) {
+  const raw = CN(q.passage || '');
+  if (!raw) return '';
+  const tr = examTrans(q);
+  const uid = 'ep' + Math.random().toString(36).slice(2, 8);
+  return `<details class="card passage stickyPassage" id="${uid}" open>
+    <summary>原文 ${raw.length} 字 ｜ 框内可上下滑动${tr ? ' ｜ 可切全文译文' : ''}</summary>
+    <div class="row" style="margin-top:6px"><button class="btn ghost" data-pv="raw" data-uid="${uid}">原文</button>
+      ${tr ? `<button class="btn ghost" data-pv="trans" data-uid="${uid}">全文译文</button>` : ''}</div>
+    <div data-pane="raw"><div class="ptext" style="max-height:44vh;overflow:auto">${raw}</div></div>
+    ${tr ? `<div data-pane="trans" style="display:none"><div class="ptext pre" style="max-height:44vh;overflow:auto">${CN(tr)}</div></div>` : ''}
+  </details>`;
+}
+/** 考试卷里的短文完成（两步：先补短语，再填正文；选项写进 exam.picks） */
+function examDuanwenHtml() {
+  const idx = examNoIndex();
+  const years = [...new Set(exam.qs.filter((q) => q.no >= 58 && q.no <= 77)
+    .map((q) => String(q.yr || exam.year)))];
+  return years.map((y) => {
+    const dw = ((CONTENT.materials || {}).duanwen || {})[y] || [];
+    return dw.map((t, gi) => {
+      const pick = {};
+      (t['短语项'] || []).forEach((it) => { const i = idx[String(it['题号'])]; pick[it.k] = exam.picks[i] || ''; });
+      const optText = (it, letter) => CN(String((it['选项'] || {})[letter] || ''));
+      const phrase = (k) => {
+        const it = (t['短语项'] || []).find((x) => x.k === k);
+        if (!it) return k;
+        return (CN(it['前置']) + ' ' + (pick[k] ? optText(it, pick[k]) : '…') + ' ' + CN(it['尾巴'])).replace(/\s+/g, ' ').trim();
+      };
+      const step1 = (t['短语项'] || []).map((it) => {
+        const i = idx[String(it['题号'])];
+        const opts = Object.entries(it['选项'] || {});
+        return `<div style="margin-top:6px">${it.k}. ${CN(it['前置'])}
+          <select data-eq2="${i}" style="min-height:34px;padding:4px 8px;font-size:13px;margin:0 3px;max-width:52vw">
+            <option value="">选…</option>
+            ${opts.map(([k, v]) => `<option value="${k}" ${exam.picks[i] === k ? 'selected' : ''}>${k}. ${CN(v)}</option>`).join('')}
+          </select> ${CN(it['尾巴'])}<span class="muted" style="font-size:12px"> 第 ${it['题号']} 题</span></div>`;
+      }).join('');
+      const letters = (t['短语项'] || []).map((x) => x.k);
+      const body = CN(t['正文']).replace(/\((\d{1,3})\)\s*_+/g, (m, no) => {
+        const q = (t['正文题'] || []).find((x) => String(x['空']) === String(no));
+        const i = q ? idx[String(q['题号'])] : null;
+        if (i === null || i === undefined) return `<b>(${no})</b> ____`;
+        return `<span style="white-space:nowrap"><b>(${no})</b>
+          <select data-eq2="${i}" style="min-height:34px;padding:4px 8px;font-size:13px;margin:0 3px;max-width:46vw">
+            <option value="">选…</option>
+            ${letters.map((k) => `<option value="${k}" ${exam.picks[i] === k ? 'selected' : ''}>${k}. ${phrase(k)}</option>`).join('')}
+          </select><span class="muted" style="font-size:11px">第 ${q['题号']} 题</span></span>`;
+      });
+      return `<div class="card q" style="margin-top:10px"><div class="muted"><b>短文完成第 ${gi + 1} 段${dw.length > 1 ? ' / ' + dw.length : ''} · ${CN(t['名'])}</b></div>
+        <div class="muted" style="margin-top:6px"><b>第一步 · 用方框里的词补全短语</b></div>
+        <div class="hint" style="margin-top:4px">方框选项：${(t['框内选项'] || []).map((b) => `<b>${b.k}.</b> ${CN(b['词'])}`).join('　')
+          || Object.entries((t['短语项'] || [{}])[0]['选项'] || {}).map(([k, v]) => `<b>${k}.</b> ${CN(v)}`).join('　')}</div>
+        ${step1}
+        <div class="muted" style="margin-top:10px"><b>第二步 · 把补全后的短语填进正文</b></div>
+        <div class="ptext" style="margin-top:4px;border:1px solid var(--line);border-radius:10px;padding:10px;max-height:44vh;overflow:auto">${body}</div>
+      </div>`;
+    }).join('');
+  }).join('');
+}
+function examSheetHtml() {
+  const answered = Object.keys(exam.picks).length;
+  return `<div class="card" id="examSheet"><h3>答题卡 <span class="muted" style="font-size:12px">点题号跳过去</span></h3>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${exam.qs.map((q, i) =>
+      `<button class="btn ghost" data-jump="${i}" style="min-width:38px;padding:6px 8px;${exam.picks[i] ? 'background:#e8f1fd;border-color:#9dc2f0' : ''}">${i + 1}</button>`).join('')}</div>
+    <div class="muted" id="sheetMsg" style="font-size:12px;margin-top:8px">已答 ${answered}/${exam.qs.length}${answered < exam.qs.length ? '（灰底＝还没答）' : '（全答完，可以交卷）'}</div></div>`;
+}
 function startExam(mode) {
   const paper = buildPaper(mode);
   if (!paper.qs.length) { alert('没有可用的题目（错题本为空？）'); return; }
-  exam = { name: paper.name, qs: paper.qs, picks: {}, startTs: Date.now(), limitMin: paper.limitMin, year: paper.year };
+  exam = { name: paper.name, qs: paper.qs, picks: {}, startTs: Date.now(), limitMin: paper.limitMin,
+           year: paper.year, autoSubmitted: false };
   renderExamPaper();
   exam.timerId = setInterval(updateExamClock, 1000);
 }
@@ -923,29 +1104,73 @@ function updateExamClock() {
   const left = exam.limitMin * 60 - sec;
   el.textContent = `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}` +
     ` / 限时 ${exam.limitMin} 分${left < 0 ? '（已超时）' : ''}`;
+  // 到点自动交卷（给 30 秒宽限，只触发一次）
+  if (left <= -30 && !exam.autoSubmitted) {
+    exam.autoSubmitted = true;
+    alert('时间到，已自动交卷（未答的按错算）');
+    finishExam();
+  }
 }
 function renderExamPaper() {
   const answered = Object.keys(exam.picks).length;
+  const dwOnly = exam.qs.every((q) => q.no >= 58 && q.no <= 77);
+  let body = '';
+  if (dwOnly) {
+    body = examDuanwenHtml();
+  } else {
+    let lastPassage = null;
+    body = exam.qs.map((q, i) => {
+      let head = '';
+      if (q.passage && q.passage !== lastPassage) { lastPassage = q.passage; head = examPassageHtml(q); }
+      return head + `<div class="card q" id="eq${i}"><div class="muted">第 ${i + 1} 题 ｜ ${CN(q.section)}${q.yr ? ' ｜ 真题 ' + q.yr + ' 年第 ' + q.no + ' 题' : ''}</div>
+        <div>${q.stem}</div>
+        ${Object.keys(q.options || {}).map((k) => `<button class="opt ${exam.picks[i] === k ? 'right' : ''}" data-eq="${i}" data-k="${k}">${k}. ${CN(q.options[k])}</button>`).join('')}</div>`;
+    }).join('');
+  }
   view().innerHTML = `
     <div class="card" style="position:sticky;top:44px;z-index:4"><div class="row"><b>${exam.name}</b>
       <span class="muted" id="examClock">00:00</span>
       <span class="muted" id="examProg">已答 ${answered}/${exam.qs.length}</span>
       <button class="btn" id="btnSubmit">交卷</button>
       <button class="btn ghost" id="btnAbort">放弃</button></div></div>
-    <div id="examBox">${exam.qs.map((q, i) => `<div class="card q"><div class="muted">第 ${i + 1} 题 ｜ ${CN(q.section)}${q.yr ? ' ｜ 真题 ' + q.yr + ' 年第 ' + q.no + ' 题' : ''}</div>
-      <div>${q.stem}</div>
-      ${Object.keys(q.options || {}).map((k) => `<button class="opt" data-eq="${i}" data-k="${k}">${k}. ${q.options[k]}</button>`).join('')}</div>`).join('')}</div>`;
+    ${examSheetHtml()}
+    <div id="examBox">${body}</div>`;
   updateExamClock();
   view().querySelectorAll('.opt').forEach((b) => b.onclick = () => {
     const i = b.dataset.eq;
     exam.picks[i] = b.dataset.k;
     view().querySelectorAll(`.opt[data-eq="${i}"]`).forEach((x) => x.classList.remove('right'));
     b.classList.add('right');
+    refreshSheet();
+  });
+  view().querySelectorAll('select[data-eq2]').forEach((s) => s.onchange = () => {
+    exam.picks[s.dataset.eq2] = s.value;
+    refreshSheet();
+  });
+  const refreshSheet = () => {
     const prog = document.getElementById('examProg');
-    if (prog) prog.textContent = `已答 ${Object.keys(exam.picks).length}/${exam.qs.length}`;
+    const n = Object.keys(exam.picks).length;
+    if (prog) prog.textContent = `已答 ${n}/${exam.qs.length}`;
+    const msg = document.getElementById('sheetMsg');
+    if (msg) msg.textContent = `已答 ${n}/${exam.qs.length}${n < exam.qs.length ? '（灰底＝还没答）' : '（全答完，可以交卷）'}`;
+    view().querySelectorAll('[data-jump]').forEach((b) => {
+      const on = !!exam.picks[b.dataset.jump];
+      b.style.background = on ? '#e8f1fd' : '';
+      b.style.borderColor = on ? '#9dc2f0' : '';
+    });
+  };
+  view().querySelectorAll('[data-jump]').forEach((b) => b.onclick = () => {
+    const t = document.getElementById('eq' + b.dataset.jump);
+    if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  view().querySelectorAll('[data-pv]').forEach((b) => b.onclick = () => {
+    const host = document.getElementById(b.dataset.uid);
+    if (!host) return;
+    host.querySelectorAll('[data-pane]').forEach((p) => p.style.display = (p.dataset.pane === b.dataset.pv ? 'block' : 'none'));
   });
   $('#btnSubmit').onclick = () => {
-    if (!confirm(`确认交卷？已答 ${Object.keys(exam.picks).length}/${exam.qs.length} 题`)) return;
+    const un = exam.qs.length - Object.keys(exam.picks).length;
+    if (!confirm(`确认交卷？已答 ${Object.keys(exam.picks).length}/${exam.qs.length}${un ? `，还有 ${un} 题没答（按错算）` : ''}`)) return;
     finishExam();
   };
   $('#btnAbort').onclick = () => { if (confirm('放弃这次考试？不计成绩')) { clearInterval(exam.timerId); exam = null; renderPractice(); } };
@@ -962,7 +1187,6 @@ function finishExam() {
     const right = pick && String(q.answer || '').trim().toUpperCase().startsWith(pick);
     if (right) { bySec[sec].right++; rightCount++; }
     else wrongs.push(q);
-    // 答题记录入库（键＝「年份:题号」，做错的自动进错题本）
     const qid = qidOf(q, exam.year);
     if (qid.split(':')[0]) {
       const prev = state.answers[qid];
@@ -975,22 +1199,59 @@ function finishExam() {
   const paperTotal = exam.qs.length;
   const score75 = Math.round(rightCount / paperTotal * 75);          // 折算成整卷 75 分制
   const record = { name: exam.name, date: new Date().toISOString().slice(0, 16).replace('T', ' '),
-                   score: rightCount, paperTotal, score75, total: score75, minutes,
+                   score: rightCount, paperTotal, score75, total: score75, minutes, essay: null,
                    sections: bySec, wrong: wrongs.length };
+  exam.finished = true;                       // 交卷后试卷作废，避免"切走再回来"又弹出旧卷（2026-10-16 修）
   state.exams = state.exams || [];
   state.exams.push(record);
   saveState();
-  view().innerHTML = `<div class="card"><h3>成绩单 · ${record.name}</h3>
-      <div style="font-size:30px;font-weight:700">${record.score} <span class="muted" style="font-size:16px">/ ${paperTotal}（本卷客观题）</span></div>
-      <div class="muted">正确率 ${Math.round(record.score / paperTotal * 100)}% ｜ 折算整卷：<b>${score75} / 75</b></div>
-      <div class="muted">用时 ${minutes} 分钟 ｜ 错题 ${wrongs.length} 道已自动进错题本</div>
-      <div style="margin-top:10px">${Object.entries(bySec).map(([s, v]) =>
+  renderScoreCard(record);
+}
+/** 成绩单：自评翻译写作 → 总分/100 → 与 60/70 对比 → 薄弱题型一键开练 → 历史趋势 */
+function renderScoreCard(record) {
+  const idx = state.exams.length - 1;
+  const draw = () => {
+    const e = state.exams[idx];
+    const total100 = e.score75 + (e.essay === null || e.essay === undefined ? 0 : e.essay);
+    const weak = Object.entries(e.sections || {}).filter(([, v]) => v.total >= 3)
+      .sort((a, b) => (a[1].right / a[1].total) - (b[1].right / b[1].total))[0];
+    const hist = state.exams.slice(-5).map((x) => x.score75);
+    const avg = Math.round(hist.reduce((a, b) => a + b, 0) / hist.length);
+    const best = Math.max(...state.exams.map((x) => x.score75));
+    view().innerHTML = `<div class="card"><h3>成绩单 · ${e.name}</h3>
+      <div style="font-size:30px;font-weight:700">${e.score} <span class="muted" style="font-size:16px">/ ${e.paperTotal}（客观题答对）</span></div>
+      <div class="muted">正确率 ${Math.round(e.score / e.paperTotal * 100)}% ｜ 客观题折算：<b>${e.score75} / 75</b> ｜ 用时 ${e.minutes} 分钟</div>
+      <div style="margin-top:10px" class="row"><span class="muted" style="align-self:center">翻译写作自评（0-25）：</span>
+        <input id="essayScore" type="number" min="0" max="25" step="1" style="width:70px" value="${e.essay === null || e.essay === undefined ? '' : e.essay}">
+        <button class="btn" id="btnSaveEssay">保存自评</button></div>
+      <div class="hint" style="margin-top:10px">总分（100 分制）：<b>${e.essay === null || e.essay === undefined ? '待填自评' : total100}</b>
+        ｜ 目标：及格 60（${total100 >= 60 ? '已达标 ✅' : '还差 ' + (60 - total100) + ' 分'}）／冲刺 70（${total100 >= 70 ? '已达标 ✅' : '还差 ' + (70 - total100) + ' 分'}）</div>
+      <div style="margin-top:10px">${Object.entries(e.sections || {}).map(([s, v]) =>
         `${s}：${v.right}/${v.total}（${Math.round(v.right / v.total * 100)}%）`).join('<br>')}</div>
-      <div class="hint" style="margin-top:10px">参考：客观题 45/75 ≈ 总分 60 分线（翻译写作 25 分另计，建议自评后记在周报里）。</div>
+      ${weak ? `<div class="hint" style="margin-top:10px">最弱：${weak[0]}（${Math.round(weak[1].right / weak[1].total * 100)}%）→ 建议现在就补一组</div>
+        <div class="row" style="margin-top:6px"><button class="btn" id="btnWeakDrill">练「${weak[0]}」</button></div>` : ''}
+      <div class="muted" style="margin-top:10px">历史（近 5 次客观折算）：${hist.join(' → ')} ｜ 平均 ${avg} ｜ 最高 ${best}</div>
+      <div class="muted" style="margin-top:4px">错题 ${e.wrong} 道已自动进错题本</div>
       <div class="row" style="margin-top:12px"><button class="btn" id="btnBackExam">返回考试中心</button>
-      <button class="btn ghost" id="btnGoWrong">看错题本</button></div></div>`;
-  $('#btnBackExam').onclick = () => { exam = null; renderPractice(); };
-  $('#btnGoWrong').onclick = () => { exam = null; subPractice = 'wrong'; renderPractice(); };
+        <button class="btn ghost" id="btnGoWrong">看错题本</button></div></div>`;
+    const sv = document.getElementById('btnSaveEssay');
+    if (sv) sv.onclick = () => {
+      const v = parseInt((document.getElementById('essayScore') || {}).value, 10);
+      if (isNaN(v) || v < 0 || v > 25) { alert('自评请填 0-25 的整数'); return; }
+      state.exams[idx].essay = v;
+      state.exams[idx].total = state.exams[idx].score75 + v;
+      saveState(); draw();
+    };
+    const wd = document.getElementById('btnWeakDrill');
+    if (wd && weak) wd.onclick = () => {
+      exam = null; pYear = null;
+      pQuestions = shufflePick(allBySection(weak[0]), 10);
+      subPractice = 'exam'; switchTab('practice');
+    };
+    document.getElementById('btnBackExam').onclick = () => { exam = null; subPractice = 'testing'; renderPractice(); };
+    document.getElementById('btnGoWrong').onclick = () => { exam = null; subPractice = 'wrong'; renderPractice(); };
+  };
+  draw();
 }
 function countOf(year, section) {
   const [lo, hi] = SECTIONS[section] || [1, 10];
@@ -1605,7 +1866,7 @@ function renderMine() {
 
     <div class="card"><h3>计划与内容如何更新</h3>
       <div class="muted">当前计划：<b>${CONTENT.plan['起始']}</b> 起 <b>${(CONTENT.plan['日计划'] || []).length}</b> 天${state.planOverride ? '（已导入）' : '（内置）'}</div>
-      <div style="margin-top:6px">· <b>换计划 / 换内容</b>：我在后台改完，你在<b>今日页顶部点「一键更新」</b>即可；平时打开 App 也会自动检查，通常你什么都不用做。</div>
+      <div style="margin-top:6px">· <b>换计划 / 换内容</b>：我在后台改完，你在<b>今日页顶部点「同步」</b>即可（同步＝拉新内容 + 拉云端分析）；平时打开 App 也会自动检查，通常你什么都不用做。学习记录往上走用<b>同一条下面的「上传」</b>：自动模式会自己传，手动模式填码后点「上传」。</div>
       <div>· <b>每周节奏</b>：电脑端每周日 21:30 自动拉你的学习记录 → 按完成率/正确率重排下周计划 → 自动发版；你下次打开就是新计划，全程不用你动手。</div></div>
 
     <div class="card"><h3>时间提醒（导入手机日历）</h3>
@@ -1613,39 +1874,19 @@ function renderMine() {
       <div class="row" style="margin-top:10px"><a class="btn" href="./英语学习提醒.ics" download>下载日历提醒（.ics）</a></div>
       <div class="muted" style="margin-top:6px;font-size:12px">不依赖电脑、不依赖网络；想改时间或加节假日例外，跟我说一句我重新生成。</div></div>
 
-    <div class="card"><h3>上传（学习记录云同步）</h3>
-      <div class="muted">开启后<b>全自动上传</b>：你做过的题、背过的词会自动传到云端，设备间自动一致，不用手动导出导入。地址已自动填好，一般只要填同步码。</div>
-      <div class="row" style="margin-top:6px"><input id="syncUrl" placeholder="https://.../api/sync" style="flex:1;min-width:170px" value="${(state.sync && state.sync.url) || defaultSyncUrl()}">
-      <input id="syncKey" type="password" placeholder="同步码" style="width:110px" value="${(state.sync && state.sync.key) || ''}"></div>
-      <div class="muted" style="margin-top:6px">${channelNote()}</div>
-      <div class="row" style="margin-top:6px"><label class="muted"><input type="checkbox" id="syncAuto" ${state.sync && state.sync.auto === false ? '' : 'checked'} style="vertical-align:-2px"> 改动自动上传（推荐）</label></div>
-      <div class="row" style="margin-top:8px"><button class="btn ghost" id="btnDown">从云端还原</button>
-      <span class="muted" id="syncMsg">${syncStatusText()}</span></div></div>
-
-    <div class="card"><h3>关于</h3><div class="muted">离线可用｜内容来自你自己的 32 份资料｜考试日期 ${CONTENT.plan['考试日期']}（官方公布前为占位）</div></div>`;
+    <div class="card"><h3>关于</h3>
+      <div class="muted">离线可用｜内容来自你自己的 32 份资料｜考试日期 ${CONTENT.plan['考试日期']}（官方公布前为占位）</div>
+      <div class="muted" style="margin-top:6px">上传 / 同步已移到<b>「今日」页顶部（同步按钮下面）</b>：自动模式会自己传；手动模式填同步码后点「上传」。</div>
+      <div class="row" style="margin-top:8px"><button class="btn ghost" id="btnDown">从云端还原（用云端数据覆盖本机）</button></div></div>`;
 
   const saveSync = () => {
     const old = state.sync || {};
-    state.sync = Object.assign({}, old, {
-      url: $('#syncUrl').value.trim(), key: $('#syncKey').value.trim(),
-      auto: $('#syncAuto').checked });
+    state.sync = Object.assign({}, old, { url: old.url || defaultSyncUrl(), key: old.key || defaultSyncKey() });
     saveState();
   };
-  $('#syncAuto').onchange = () => { saveSync(); if ($('#syncAuto').checked) autoSync(); renderMine(); };
-  $('#btnDown').onclick = async () => {
-    saveSync(); if (!state.sync.url || !state.sync.key) return alert('先填地址和同步码');
-    if (!confirm(state.sync.conflict ? '云端是别的设备改过的版本，用它覆盖本机？' : '用云端数据覆盖本机数据？')) return;
-    try {
-      const r = await fetch(state.sync.url, { cache: 'no-store', headers: { 'Authorization': 'Bearer ' + state.sync.key } });
-      if (r.status === 404) return alert('云端还没有数据');
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const j = await r.json(), sync = state.sync;
-      state = j.state;
-      state.sync = Object.assign({}, sync, { lastSync: j.updatedAt || new Date().toLocaleString(),
-                                             pending: false, conflict: false });
-      saveStateRaw(); alert('已从云恢复'); renderMine();
-    } catch (e) { alert('恢复失败：' + e.message); }
-  };
+  saveSync();
+  const db = document.getElementById('btnDown');
+  if (db) db.onclick = pullFromCloud;
   const examBtn = document.getElementById('btnExamEntry');
   if (examBtn) examBtn.onclick = () => { subPractice = 'testing'; switchTab('practice'); };
 }
