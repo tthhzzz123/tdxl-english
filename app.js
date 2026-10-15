@@ -1014,15 +1014,22 @@ function renderQuestions() {
     if (q.passage && q.passage !== lastPassage && pSection !== '词汇题') {   // 词汇题不显示"原文"（原卷也没有）
       lastPassage = q.passage;
       const yr = String(q.yr || pYear || '');
-      const ls = ((CONTENT.materials || {}).longSentences || {})[yr] || [];
+      const fp = CN(q.passage).replace(/\s+/g, ' ').trim().slice(0, 60);      // 段落指纹
+      const lsObj = (((CONTENT.materials || {}).longSentences || {})[yr]) || null;
+      const ls = (lsObj && lsObj.fp === fp) ? (lsObj.items || []) : [];       // 精析只挂它对应的那一段
       const auto = (((CONTENT.materials || {}).longSentencesAuto || {})[yr] || {})[pSection] || [];
+      const tr = ((((CONTENT.materials || {}).passageTranslation || {})[yr]) || {})[fp] || '';
       const uid = 'ps' + Math.random().toString(36).slice(2, 8);
       head = `<details class="card passage stickyPassage" id="${uid}"><summary>${pSection} ｜ 原文 ${q.passage.length} 字 ／ 长难句 ${auto.length + ls.length} 句（点开后可一直停在顶部）</summary>
         <div class="row" style="margin-top:8px"><button class="btn ghost" data-pv="raw" data-uid="${uid}">原文</button>
-          <button class="btn ghost" data-pv="parse" data-uid="${uid}">长难句解析</button></div>
+          <button class="btn ghost" data-pv="parse" data-uid="${uid}">长难句解析</button>
+          ${tr ? `<button class="btn ghost" data-pv="trans" data-uid="${uid}">全文译文</button>` : ''}</div>
         <div data-pane="raw">
           ${q.passageOptions ? `<div class="hint" style="margin-top:6px"><b>选项</b>：${CN(q.passageOptions)}</div>` : ''}
           <div class="ptext">${q.passage}</div></div>
+        <div data-pane="trans" style="display:none">
+          <div class="ptext pre" style="margin-top:6px">${CN(tr)}</div>
+          <div class="muted" style="font-size:12px;margin-top:6px">译自题库解析，供对照；有出入以你的理解为准。</div></div>
         <div data-pane="parse" style="display:none">
           ${ls.length ? `<div class="muted" style="margin-top:6px"><b>人工精析（含译文）</b></div>
             ${ls.map((x, i) => `<details style="margin-top:6px;border-top:1px dashed var(--line2);padding-top:6px">
