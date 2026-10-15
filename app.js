@@ -930,7 +930,9 @@ function renderQuestions() {
       lastPassage = q.passage;
       const yr = String(q.yr || pYear || '');
       const ls = ((CONTENT.materials || {}).longSentences || {})[yr] || [];
-      head = `<details class="card passage"><summary>📖 文章原文（${q.passage.length} 字，点开）</summary><div class="ptext">${q.passage}</div>
+      head = `<details class="card passage stickyPassage"><summary>📖 原文（${q.passage.length} 字 · 点开后可一直停在顶部）</summary>
+        ${q.passageOptions ? `<div class="hint" style="margin-top:6px"><b>选项</b>：${CN(q.passageOptions)}</div>` : ''}
+        <div class="ptext">${q.passage}</div>
         ${ls.length ? `<details class="card passage" style="margin-top:8px;background:#f6fbff"><summary>🧩 长难句解析（${ls.length} 句 · 点开才显示）</summary>
           ${ls.map((x, i) => `<details style="margin-top:8px;border-top:1px dashed var(--line2);padding-top:6px">
             <summary style="cursor:pointer;font-size:14px">第 ${i + 1} 句：${CN(x.sentence).slice(0, 46)}…</summary>
