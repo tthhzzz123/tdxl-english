@@ -1,5 +1,5 @@
 /* 离线缓存：外壳「网络优先」（更新即时生效），内容包「先给缓存、后台更新」（省流量、能离线、下次打开就是新版） */
-const CACHE = 'tdxl-v3';
+const CACHE = 'tdxl-v4';
 const ASSETS = ['./index.html', './app.js', './style.css', './manifest.webmanifest', './icon.svg', './data/content.json'];
 
 self.addEventListener('install', (e) => {
@@ -36,7 +36,8 @@ self.addEventListener('fetch', (e) => {
     }));
     return;
   }
-  e.respondWith(fetch(e.request).then((res) => {
+  // 外壳直连网络（带 no-store）：更新的那一刻就要生效，别被浏览器 HTTP 缓存顶掉；离线再退回 SW 缓存
+  e.respondWith(fetch(e.request, { cache: 'no-store' }).then((res) => {
     const copy = res.clone();
     caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
     return res;
