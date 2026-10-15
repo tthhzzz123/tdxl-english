@@ -915,6 +915,14 @@ function renderExam() {
   $('#btnStart').onclick = () => {
     const [lo, hi] = SECTIONS[pSection] || [1, 10];
     pQuestions = (CONTENT.exams[pYear] || []).filter((q) => q.no >= lo && q.no <= hi);
+    // ①没做过的排前面 ②词汇题/口语交际按日期轮换顺序（同一天内稳定，第二天会变）
+    const done = (q) => { const r = state.answers[qidOf(q, pYear)]; return r && r.k ? 1 : 0; };
+    pQuestions.sort((a, b) => done(a) - done(b));
+    if (pSection === '词汇题' || pSection === '口语交际') {
+      const seed = todayStr().split('').reduce((s, c) => s + c.charCodeAt(0), 0);
+      const off = seed % Math.max(1, pQuestions.length);
+      pQuestions = pQuestions.slice(off).concat(pQuestions.slice(0, off));
+    }
     renderQuestions();
   };
   if (pQuestions.length) renderQuestions();
@@ -985,7 +993,8 @@ function renderDuanwen(qs, box) {
       <div class="dwSec" data-g="${gi}"></div>
       <div class="row" style="margin-top:8px"><button class="btn" data-dwcheck="${gi}">对答案</button>
         <button class="btn ghost" data-dwreveal="${gi}">看答案</button>
-        <span class="muted" data-dwmsg="${gi}"></span></div></div>`).join('')}</div>`;
+        <span class="muted" data-dwmsg="${gi}"></span></div>
+      <div class="explain" data-dwexp="${gi}" style="display:none;margin-top:8px"></div></div>`).join('')}</div>`;
   groups.forEach((g, gi) => {
     const byBlank = {};
     g.qs.forEach((q) => { byBlank[Math.max(1, q.no - 2)] = q; });      // 题号 58 ↔ 空 (56)
@@ -1031,6 +1040,17 @@ function renderDuanwen(qs, box) {
     });
     saveState();
     box.querySelector(`[data-dwmsg="${gi}"]`).textContent = `已判 ${total} 空 ｜ 对 ${right} 空（错的已进错题本）`;
+    const exp = box.querySelector(`[data-dwexp="${gi}"]`);
+    if (exp) {
+      exp.style.display = 'block';
+      exp.innerHTML = Object.keys(byBlank).sort((a, b) => a - b).map((no) => {
+        const q = byBlank[no];
+        const ans = String(q.answer || '').trim();
+        const ansText = (q.options || {})[ans[0]] || '';
+        return `<div style="margin-top:6px"><b>(${no}) 答案 ${ans}</b>. ${CN(ansText)}
+          ${q.explanation ? '<div class="muted" style="margin-top:2px">' + CN(q.explanation) + '</div>' : ''}</div>`;
+      }).join('');
+    }
   };
     box.querySelector(`[data-dwcheck="${gi}"]`).onclick = () => mark(false);
     box.querySelector(`[data-dwreveal="${gi}"]`).onclick = () => mark(true);
