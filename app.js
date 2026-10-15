@@ -154,6 +154,26 @@ function taskProgressAt(date, t) {
       r.retried && new Date(r.retried).toLocaleDateString('sv-SE') === date).length;
     return { done: Math.min(retried, wrong), total: wrong, status: retried >= wrong ? 'ok' : retried ? 'doing' : 'todo' };
   }
+  if (ty === '订正') {                       // 订正＝今天把错题登记/订正过（或错题本本来为空）
+    const todayLog = (state.wrongLog || []).filter((x) => new Date(x.at).toLocaleDateString('sv-SE') === date);
+    const corrected = todayLog.filter((x) => x.corrected).length;
+    const errs = todayLog.filter((x) => !x.right).length;
+    if (!errs) return { done: 1, total: 1, status: 'ok' };
+    return { done: Math.min(corrected, errs), total: errs,
+             status: corrected >= errs ? 'ok' : corrected ? 'doing' : 'todo' };
+  }
+  if (ty === '周复盘') {                     // 周复盘＝本周点开过一次复盘
+    const done = Object.keys(act.read).some((k) => k.startsWith('review:')) || !!state.lastReview;
+    return { done: done ? 1 : 0, total: 1, status: done ? 'ok' : 'todo' };
+  }
+  if (ty === '长难句') {                     // 长难句＝今天打开过该年份的解析
+    const done = Object.keys(act.read).some((k) => k.startsWith('longsentences:'));
+    return { done: done ? 1 : 0, total: 1, status: done ? 'ok' : 'todo' };
+  }
+  if (ty === '限时阅读') {                   // 限时阅读＝今天记录过一次阅读速度
+    const done = (state.speed || []).some((s) => s.date === date);
+    return { done: done ? 1 : 0, total: 1, status: done ? 'ok' : 'todo' };
+  }
   const words = t['词表'] || [];
   if (words.length) {
     const done = words.filter((w) => act.words[String(w).toLowerCase()]).length;
@@ -375,10 +395,67 @@ function taskAction(t) {
   if (ty === '语法/考点' || ty === '考点速记') return { label: '去读', go: () => goTipsNext() };
   if (ty === '翻译/写作' || ty === '写作') return { label: '去写作', go: () => goWriting(t['年份']) };
   if (ty === '错题重做') return { label: '去错题', go: () => { subPractice = 'wrong'; switchTab('practice'); } };
+  // —— 最终计划新增的四类任务（2026-10-15 重构）——
+  if (ty === '订正') return { label: '去订正', go: () => { subPractice = 'wrong'; switchTab('practice'); } };
+  if (ty === '周复盘') return { label: '看复盘', go: () => { subPractice = 'review'; switchTab('mine'); } };
+  if (ty === '长难句') return { label: '看解析', go: () => goLongSentences(t['年份']) };
+  if (ty === '限时阅读') return { label: '限时开练', go: () => goTimedReading(t['年份'], t['题量'] || 2) };
   if (ty === '整卷模考') return { label: '开考', go: () => goPractice(t['年份'], t['题型'] === '整卷' ? '词汇题' : t['题型']) };
   if (['词汇题', '精读', '口语交际', '阅读理解', '完形填空', '短文完成'].includes(ty))
     return { label: '去做题', go: () => goPractice(t['年份'], t['题型'] || ty) };
   return null;
+}
+/** 长难句：直达该年份阅读理解的「长难句解析」视图（原文卡里可切换） */
+function goLongSentences(year) {
+  const y = String(year || pYear || '');
+  subPractice = 'exam';
+  switchTab('practice');
+  setTimeout(() => {
+    const host = [...document.querySelectorAll('details.stickyPassage')][0];
+    if (!host) { alert('请先在该年真题的阅读理解里打开原文'); return; }
+    host.open = true;
+    const btn = host.querySelector('[data-pv="parse"]');
+    if (btn) btn.click();
+    todayAct().read['longsentences:' + y] = Date.now(); saveState();
+    host.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 120);
+}
+/** 限时阅读：进入该年阅读理解并开启计时提示（读完点「限时完成」记录用时） */
+function goTimedReading(year, papers) {
+  goPractice(year, '阅读理解');
+  setTimeout(() => {
+    const box = document.getElementById('qbox');
+    if (!box) return;
+    const n = Number(papers) || 2;
+    const bar = document.createElement('div');
+    bar.className = 'card';
+    bar.id = 'timedBar';
+    bar.innerHTML = `<div class="row" style="justify-content:space-between"><b>⏱ 限时阅读（${n} 篇）</b>
+      <span class="muted" id="timedClock">00:00</span>
+      <button class="btn" id="btnTimedDone">限时完成</button></div>
+      <div class="muted" style="margin-top:6px">读完点「限时完成」，系统按篇章词数 ÷ 用时记录你的阅读速度（wpm）。</div>`;
+    box.parentNode.insertBefore(bar, box);
+    const t0 = Date.now();
+    const id = setInterval(() => {
+      const el = document.getElementById('timedClock');
+      if (el) el.textContent = String(Math.floor((Date.now() - t0) / 60000)).padStart(2, '0') + ':' +
+        String(Math.floor((Date.now() - t0) / 1000) % 60).padStart(2, '0');
+    }, 1000);
+    document.getElementById('btnTimedDone').onclick = () => {
+      clearInterval(id);
+      const mins = Math.max(0.5, (Date.now() - t0) / 60000);
+      const passages = pQuestions.slice(0, 5);
+      const words = passages.reduce((a, q) => a + (CN(q.passage || '').split(/\s+/).filter(Boolean).length), 0) || 380 * n;
+      state.speed = state.speed || [];
+      state.speed.push({ date: todayStr(), words: words, minutes: Math.round(mins * 10) / 10,
+                         wpm_read: Math.round(words / mins) });
+      state.speed = state.speed.slice(-60);
+      todayAct().read['timed:' + todayStr()] = Date.now();
+      saveState();
+      alert(`已记录：${words} 词 / ${mins.toFixed(1)} 分钟 ≈ ${Math.round(words / mins)} 词/分`);
+      bar.remove();
+    };
+  }, 150);
 }
 /** 直达练习：指定年份与题型并自动开始 */
 function practiceSection(sec) {
@@ -1320,7 +1397,36 @@ function exportCsv() {
 function renderMine() {
   fixSyncUrl();
   const rep = weeklyReport();
+  let reviewCard = '';
+  if (subPractice === 'review') {          // 周复盘（计划里「周复盘」任务的落点）
+    const st = wrongStats();
+    const sp = (state.speed || []).slice(-3);
+    const spTxt = sp.length ? sp.map((x) => `${x.date} ${x.wpm_read} 词/分`).join(' ｜ ') : '本周还没记录';
+    const items = [
+      ['本周完成率', (rep.avgCompletion === null ? '—' : rep.avgCompletion + '%') + (rep.avgCompletion !== null && rep.avgCompletion < 70 ? '（<70%，下周日会自动减量）' : '')],
+      ['学习天数', rep.studiedDays + '/7'],
+      ['正确率', (rep.avgAccuracy === null ? '—' : rep.avgAccuracy + '%')],
+      ['阅读速度（最近 3 次）', spTxt],
+      ['分题型', rep.sections.length ? rep.sections.map((s) => `${s.name} ${s.ratio}%（${s.total} 题）`).join('、') : '本周无答题'],
+      ['错题', `累计 ${st.total} 次 ｜ 待重做 ${st.pending} ｜ 近 7 天 ${st.last7} 次`],
+      ['词汇', `认识 ${rep.known} ｜ 模糊 ${rep.fuzzy} ｜ 不认识 ${rep.unknown}`],
+      ['下周决定', (rep.avgAccuracy === null ? '数据不足' : rep.avgAccuracy < 60 ? '新词减半、复习加倍' : rep.avgAccuracy > 85 ? '可加量 25%（上限）' : '维持')],
+    ];
+    reviewCard = `<div class="card"><h3>周复盘（8 项）</h3>
+      ${items.map(([k, v]) => `<div class="plan-row"><span class="plan-date">${k}</span><span>${v}</span></div>`).join('')}
+      <div class="muted" style="margin-top:8px">这张表每周六填一次；系统会在周日 21:30 按它自动重排下周计划。</div>
+      <div class="row" style="margin-top:10px"><button class="btn" id="btnReviewDone">标记本周复盘完成</button></div></div>`;
+    setTimeout(() => {
+      const b = document.getElementById('btnReviewDone');
+      if (b) b.onclick = () => {
+        todayAct().read['review:' + todayStr()] = Date.now();
+        state.lastReview = todayStr(); saveState();
+        alert('已记下本周复盘完成'); switchTab('today');
+      };
+    }, 0);
+  }
   view().innerHTML = `
+    ${reviewCard}
     <div class="card"><h3>最近成绩</h3>
       ${(state.exams && state.exams.length)
         ? (() => { const e = state.exams[state.exams.length - 1];
